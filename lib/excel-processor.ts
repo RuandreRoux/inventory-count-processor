@@ -29,9 +29,9 @@ const UOM_REGEX =
   /(\d+(?:\.\d+)?\s*[xX]\s*\d+(?:\.\d+)?\s*(?:l|ml|kg|g|oz)\s*(?:bag|drum|can|sachets?|pack|box|bottle|ibc)?|\d+(?:\.\d+)?\s*(?:l|ml|kg|g|oz|litre|liter|ton|tonne)\s*(?:ibc|bag|drum|can|sachets?|pack|box|bottle)?|ibc|bulk)/gi;
 
 // Known country code prefixes — order matters: longer before shorter to avoid partial matches
-const COUNTRY_CODE_PREFIXES = /^(MIDW|USA|AUS|ZIM|ZAM|ZM|NZ|US|UY|MW|KE|GH|ES|NG|PE)(_|\d)/i;
+const COUNTRY_CODE_PREFIXES = /^(MIDW|USA|AUS|ZIM|ZAM|ZM|NZ|US|UY|MW|KE|GH|ES|NG|PE|PL|CL)(_|\d)/i;
 
-const GROUP_FILTER_PATTERNS = ["S_IFS", "S_IER", "Picklogger", "TPP_L", "TPP_D", "TP_D"];
+const GROUP_FILTER_PATTERNS = ["S_IFS", "S_IER", "PICKLOGGER", "TPP_L", "TPP_D", "TP_D"];
 
 // IBC / 1000L filter for the W/O IBC sheet
 const IBC_PATTERN = /\b(ibc|1000\s*l?)\b/i;
