@@ -9,6 +9,7 @@ interface Stats {
   filteredRows: number;
   uomMatched: number;
   countryCodeRowsRemoved: number;
+  stickerRows: number;
 }
 
 type Status = "idle" | "processing" | "done" | "error";
@@ -177,6 +178,7 @@ export default function FileUpload() {
                 <StatCard label="Rows filtered out" value={stats.filteredRows} color="amber" />
                 <StatCard label="UOM extracted" value={stats.uomMatched} color="green" />
                 <StatCard label="Country code rows removed" value={stats.countryCodeRowsRemoved} color="amber" />
+                <StatCard label="Sticker rows" value={stats.stickerRows} color="amber" />
               </div>
 
               <a
@@ -200,7 +202,9 @@ export default function FileUpload() {
               <li>Sheet 2 — columns removed: System Qty, Actual Qty, Variance</li>
               <li>Sheet 2 — UOM extracted from item description into its own column</li>
               <li>Sheet 2 — rows with country code item codes removed (e.g. Aus_, NZ_, AUS0021_B)</li>
-              <li>Sheet 3 — every filtered-out row with the reason it was removed</li>
+              <li>Sheet 3 — Cleaned No IBC: same as Cleaned minus 1000L / IBC rows</li>
+              <li>Sheet 4 — Stickers: rows where description contains &quot;sticker&quot;</li>
+              <li>Sheet 5 — every filtered-out row with the reason it was removed</li>
             </ul>
           </details>
         </div>

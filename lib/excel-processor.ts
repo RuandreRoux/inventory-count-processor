@@ -6,6 +6,7 @@ export interface ProcessingStats {
   filteredRows: number;
   uomMatched: number;
   countryCodeRowsRemoved: number;
+  stickerRows: number;
 }
 
 interface FilteredRow {
@@ -30,6 +31,9 @@ const UOM_REGEX =
 // Matches any leading letters (country prefix) optionally followed by underscore
 // e.g. Aus_0266, NZ_0001, AUS0021_B, ZAM_000001
 const COUNTRY_CODE_REGEX = /^[A-Za-z]+_?(?=\d|[A-Z])/i;
+
+// IBC / 1000L filter for the W/O IBC sheet
+const IBC_PATTERN = /\b(ibc|1000\s*l?)\b/i;
 
 function cellToString(val: unknown): string {
   if (val === null || val === undefined) return "";
@@ -99,40 +103,37 @@ export function processWorkbook(buffer: Buffer): {
     filteredRows: 0,
     uomMatched: 0,
     countryCodeRowsRemoved: 0,
+    stickerRows: 0,
   };
 
-  // --- Sheet 2: Cleaned data ---
   const cleanedRows: (string | number | null)[][] = [];
+  const stickerRows: (string | number | null)[][] = [];
   const filteredRows: FilteredRow[] = [];
   let headerFound = false;
-
-  // Column indices (0-based): Item Code=0, Item Desc=1, Whse=2, Group=3, Category=4, Unit=5, SysQty=6, ActQty=7, Variance=8
-  // We keep: 0,1,2,3,4,5 and add UOM as new col 6
-  // Drop: 6 (System Qty), 7 (Actual Qty), 8 (Variance)
+  let cleanedHeader: (string | number | null)[] = [];
 
   for (const row of allRows) {
-    // Check noise
+    // Noise rows → Filtered Out
     const noiseReason = isNoiseRow(row);
     if (noiseReason) {
       filteredRows.push({ row, reason: noiseReason });
       continue;
     }
 
-    // Check duplicate header
+    // Header row — keep first, discard duplicates
     if (isHeaderRow(row)) {
       if (headerFound) {
         filteredRows.push({ row, reason: "Duplicate header row" });
         continue;
       }
       headerFound = true;
-      // Output header row with UOM column added, drop last 3
-      const headerOut = row.slice(0, 6);
-      headerOut.push("UOM");
-      cleanedRows.push(headerOut);
+      cleanedHeader = [...row.slice(0, 6), "UOM"];
+      cleanedRows.push(cleanedHeader);
+      stickerRows.push(cleanedHeader);
       continue;
     }
 
-    // Data row: remove rows with country code prefixes entirely
+    // Country code rows → Filtered Out
     const itemCode = cellToString(row[0]);
     if (itemCode && hasCountryPrefix(itemCode)) {
       filteredRows.push({ row, reason: "Country code item" });
@@ -153,25 +154,49 @@ export function processWorkbook(buffer: Buffer): {
       row[5] ?? null,
       uom || null,
     ];
+
+    // Sticker rows → Stickers sheet (not Cleaned)
+    if (/sticker/i.test(itemDesc)) {
+      stickerRows.push(cleanRow);
+      stats.stickerRows++;
+      continue;
+    }
+
     cleanedRows.push(cleanRow);
   }
 
   stats.cleanedRows = cleanedRows.length;
   stats.filteredRows = filteredRows.length;
 
+  // Cleaned W/O IBC: remove rows where description contains 1000, 1000L, or IBC
+  const cleanedNoIBC = cleanedRows.filter((row, i) => {
+    if (i === 0) return true; // keep header
+    return !IBC_PATTERN.test(cellToString(row[1]));
+  });
+
   // --- Build output workbook ---
   const outWb = XLSX.utils.book_new();
 
-  // Sheet 1: Original (deep copy of input sheet)
+  // Sheet 1: Original
   const originalSheet: XLSX.WorkSheet = Object.assign({}, inputSheet);
   XLSX.utils.book_append_sheet(outWb, originalSheet, "Original");
 
   // Sheet 2: Cleaned
   const cleanedSheet = XLSX.utils.aoa_to_sheet(cleanedRows);
-  styleHeaderRow(cleanedSheet, cleanedRows[0]?.length ?? 7);
+  styleHeaderRow(cleanedSheet, cleanedHeader.length);
   XLSX.utils.book_append_sheet(outWb, cleanedSheet, "Cleaned");
 
-  // Sheet 3: Filtered Out
+  // Sheet 3: Cleaned W/O IBC
+  const noIBCSheet = XLSX.utils.aoa_to_sheet(cleanedNoIBC);
+  styleHeaderRow(noIBCSheet, cleanedHeader.length);
+  XLSX.utils.book_append_sheet(outWb, noIBCSheet, "Cleaned No IBC");
+
+  // Sheet 4: Stickers
+  const stickersSheet = XLSX.utils.aoa_to_sheet(stickerRows);
+  styleHeaderRow(stickersSheet, cleanedHeader.length);
+  XLSX.utils.book_append_sheet(outWb, stickersSheet, "Stickers");
+
+  // Sheet 5: Filtered Out
   const filteredHeader = [
     "Item Code",
     "Item Description",
@@ -196,6 +221,5 @@ export function processWorkbook(buffer: Buffer): {
 }
 
 function styleHeaderRow(sheet: XLSX.WorkSheet, colCount: number) {
-  // Set column widths
   sheet["!cols"] = Array(colCount).fill({ wch: 20 });
 }
