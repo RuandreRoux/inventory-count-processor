@@ -133,6 +133,25 @@ export function processWorkbook(buffer: Buffer): {
       continue;
     }
 
+    const itemDesc = cellToString(row[1]);
+
+    // Sticker rows → Stickers sheet first, regardless of country code
+    if (/sticker/i.test(itemDesc)) {
+      const uom = extractUOM(itemDesc);
+      const stickerRow: (string | number | null)[] = [
+        row[0] ?? null,
+        row[1] ?? null,
+        row[2] ?? null,
+        row[3] ?? null,
+        row[4] ?? null,
+        row[5] ?? null,
+        uom || null,
+      ];
+      stickerRows.push(stickerRow);
+      stats.stickerRows++;
+      continue;
+    }
+
     // Country code rows → Filtered Out
     const itemCode = cellToString(row[0]);
     if (itemCode && hasCountryPrefix(itemCode)) {
@@ -141,7 +160,6 @@ export function processWorkbook(buffer: Buffer): {
       continue;
     }
 
-    const itemDesc = cellToString(row[1]);
     const uom = extractUOM(itemDesc);
     if (uom) stats.uomMatched++;
 
@@ -154,13 +172,6 @@ export function processWorkbook(buffer: Buffer): {
       row[5] ?? null,
       uom || null,
     ];
-
-    // Sticker rows → Stickers sheet (not Cleaned)
-    if (/sticker/i.test(itemDesc)) {
-      stickerRows.push(cleanRow);
-      stats.stickerRows++;
-      continue;
-    }
 
     cleanedRows.push(cleanRow);
   }
