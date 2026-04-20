@@ -8,7 +8,7 @@ interface Stats {
   cleanedRows: number;
   filteredRows: number;
   uomMatched: number;
-  prefixesStripped: number;
+  countryCodeRowsRemoved: number;
 }
 
 type Status = "idle" | "processing" | "done" | "error";
@@ -176,7 +176,7 @@ export default function FileUpload() {
                 <StatCard label="Cleaned rows" value={stats.cleanedRows} />
                 <StatCard label="Rows filtered out" value={stats.filteredRows} color="amber" />
                 <StatCard label="UOM extracted" value={stats.uomMatched} color="green" />
-                <StatCard label="Prefixes stripped" value={stats.prefixesStripped} color="green" />
+                <StatCard label="Country code rows removed" value={stats.countryCodeRowsRemoved} color="amber" />
               </div>
 
               <a
@@ -199,7 +199,7 @@ export default function FileUpload() {
               <li>Sheet 2 — cleaned: noise rows removed, duplicate headers removed</li>
               <li>Sheet 2 — columns removed: System Qty, Actual Qty, Variance</li>
               <li>Sheet 2 — UOM extracted from item description into its own column</li>
-              <li>Sheet 2 — country code prefixes stripped from item codes (e.g. Aus_, NZ_)</li>
+              <li>Sheet 2 — rows with country code item codes removed (e.g. Aus_, NZ_, AUS0021_B)</li>
               <li>Sheet 3 — every filtered-out row with the reason it was removed</li>
             </ul>
           </details>

@@ -5,7 +5,7 @@ export interface ProcessingStats {
   cleanedRows: number;
   filteredRows: number;
   uomMatched: number;
-  prefixesStripped: number;
+  countryCodeRowsRemoved: number;
 }
 
 interface FilteredRow {
@@ -25,9 +25,11 @@ const PAGE_PATTERN = /page\s+\d+\s+of\s+\d+/i;
 const HEADER_ROW_SIGNATURE = ["item code", "item description", "whse"];
 
 const UOM_REGEX =
-  /(\d+(?:\.\d+)?\s*[xX]\s*\d+(?:\.\d+)?\s*(?:L|ml|ML|kg|KG|g|G|oz)\s*(?:Bag|bag|Drum|drum|Can|can|Sachets?|sachets?|Pack|pack|Box|box|Bottle|bottle|IBC)?|\d+(?:\.\d+)?\s*(?:L|ml|ML|kg|KG|g|G|oz|litre|liter|ton|tonne)\s*(?:IBC|Bag|bag|Drum|drum|Can|can|Sachets?|sachets?|Pack|pack|Box|box|Bottle|bottle)?|IBC)/g;
+  /(\d+(?:\.\d+)?\s*[xX]\s*\d+(?:\.\d+)?\s*(?:l|ml|kg|g|oz)\s*(?:bag|drum|can|sachets?|pack|box|bottle|ibc)?|\d+(?:\.\d+)?\s*(?:l|ml|kg|g|oz|litre|liter|ton|tonne)\s*(?:ibc|bag|drum|can|sachets?|pack|box|bottle)?|ibc|bulk)/gi;
 
-const COUNTRY_CODE_REGEX = /^[A-Za-z]+_/;
+// Matches any leading letters (country prefix) optionally followed by underscore
+// e.g. Aus_0266, NZ_0001, AUS0021_B, ZAM_000001
+const COUNTRY_CODE_REGEX = /^[A-Za-z]+_?(?=\d|[A-Z])/i;
 
 function cellToString(val: unknown): string {
   if (val === null || val === undefined) return "";
@@ -62,8 +64,8 @@ function extractUOM(description: string): string {
   return matches[matches.length - 1].trim();
 }
 
-function stripCountryPrefix(code: string): string {
-  return code.replace(COUNTRY_CODE_REGEX, "");
+function hasCountryPrefix(code: string): boolean {
+  return COUNTRY_CODE_REGEX.test(code);
 }
 
 function sheetToRows(sheet: XLSX.WorkSheet): (string | number | null)[][] {
@@ -96,7 +98,7 @@ export function processWorkbook(buffer: Buffer): {
     cleanedRows: 0,
     filteredRows: 0,
     uomMatched: 0,
-    prefixesStripped: 0,
+    countryCodeRowsRemoved: 0,
   };
 
   // --- Sheet 2: Cleaned data ---
@@ -130,18 +132,20 @@ export function processWorkbook(buffer: Buffer): {
       continue;
     }
 
-    // Data row: strip prefix from item code, extract UOM, drop last 3 cols
+    // Data row: remove rows with country code prefixes entirely
     const itemCode = cellToString(row[0]);
+    if (itemCode && hasCountryPrefix(itemCode)) {
+      filteredRows.push({ row, reason: "Country code item" });
+      stats.countryCodeRowsRemoved++;
+      continue;
+    }
+
     const itemDesc = cellToString(row[1]);
-
-    const stripped = stripCountryPrefix(itemCode);
-    if (stripped !== itemCode) stats.prefixesStripped++;
-
     const uom = extractUOM(itemDesc);
     if (uom) stats.uomMatched++;
 
     const cleanRow: (string | number | null)[] = [
-      stripped || null,
+      row[0] ?? null,
       row[1] ?? null,
       row[2] ?? null,
       row[3] ?? null,
