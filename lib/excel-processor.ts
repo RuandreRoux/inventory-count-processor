@@ -137,7 +137,7 @@ export function processWorkbook(buffer: Buffer): {
         continue;
       }
       headerFound = true;
-      cleanedHeader = [...row.slice(0, 6), "UOM"];
+      cleanedHeader = [...row.slice(0, 4), "UOM"];
       cleanedRows.push(cleanedHeader);
       stickerRows.push(cleanedHeader);
       continue;
@@ -153,8 +153,6 @@ export function processWorkbook(buffer: Buffer): {
         row[1] ?? null,
         row[2] ?? null,
         row[3] ?? null,
-        row[4] ?? null,
-        row[5] ?? null,
         uom || null,
       ];
       stickerRows.push(stickerRow);
@@ -185,8 +183,6 @@ export function processWorkbook(buffer: Buffer): {
       row[1] ?? null,
       row[2] ?? null,
       row[3] ?? null,
-      row[4] ?? null,
-      row[5] ?? null,
       uom || null,
     ];
 
