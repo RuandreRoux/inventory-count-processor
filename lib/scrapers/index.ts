@@ -1,9 +1,18 @@
 /**
- * Set SCRAPING_ENABLED=true to activate real scraping (requires Playwright + Chromium).
- * Defaults to mock data so Vercel preview deploys always work.
+ * Scraper orchestrator.
+ *
+ * Requires SCRAPING_ENABLED=true + a Playwright-capable runtime.
+ *
+ * Local dev:
+ *   npx playwright install chromium
+ *   SCRAPING_ENABLED=true npm run dev
+ *
+ * Vercel / serverless:
+ *   Set SCRAPING_ENABLED=true in project environment variables.
+ *   The @sparticuz/chromium-min binary is fetched from GitHub Releases at runtime.
  */
+
 import type { Listing, SearchFilters, RankingWeights } from '@/lib/types';
-import { LISTINGS as MOCK_LISTINGS } from '@/lib/mock-data';
 import { rankListings } from '@/lib/ranking';
 import { cacheGet, cacheSet, cacheBuildKey } from './cache';
 
@@ -16,54 +25,59 @@ interface FetchOptions {
 
 export async function fetchListings({ filters, weights }: FetchOptions): Promise<Listing[]> {
   const cacheKey = cacheBuildKey({
-    q: filters.query, maxPrice: filters.maxPrice, maxMileage: filters.maxMileage,
-    minYear: filters.minYear, condition: filters.condition,
-    serviceHistoryOnly: filters.serviceHistoryOnly, transmission: filters.transmission,
-    fuel: filters.fuel, province: filters.province,
+    q: filters.query,
+    maxPrice: filters.maxPrice,
+    maxMileage: filters.maxMileage,
+    minYear: filters.minYear,
+    condition: filters.condition,
+    serviceHistoryOnly: filters.serviceHistoryOnly,
+    transmission: filters.transmission,
+    fuel: filters.fuel,
+    province: filters.province,
   });
 
   const cached = cacheGet(cacheKey);
-  if (cached) return rankListings(applyPostFilters(cached, filters), weights);
+  if (cached) {
+    return rankListings(applyPostFilters(cached, filters), weights);
+  }
 
-  const raw = SCRAPING_ENABLED ? await scrapeAll(filters) : getMockListings(filters);
+  const raw = await scrapeAll(filters);
   cacheSet(cacheKey, raw);
   return rankListings(applyPostFilters(raw, filters), weights);
 }
 
 async function scrapeAll(filters: SearchFilters): Promise<Listing[]> {
+  if (!SCRAPING_ENABLED) {
+    return [];
+  }
+
   const { launchBrowser } = await import('./browser');
   const { scrapeAutoTrader } = await import('./autotrader');
   const { scrapeCarsCoza } = await import('./carscoza');
+
   const browser = await launchBrowser();
   try {
-    const sf = { maxPrice: filters.maxPrice, maxMileage: filters.maxMileage, minYear: filters.minYear };
+    const sf = {
+      maxPrice: filters.maxPrice,
+      maxMileage: filters.maxMileage,
+      minYear: filters.minYear,
+    };
+
     const [at, cz] = await Promise.allSettled([
       scrapeAutoTrader(browser, filters.query, sf),
       scrapeCarsCoza(browser, filters.query, sf),
     ]);
-    if (at.status === 'rejected') console.error('[DreamCar] AutoTrader failed:', at.reason);
-    if (cz.status === 'rejected') console.error('[DreamCar] Cars.co.za failed:', cz.reason);
-    const listings = [
+
+    if (at.status === 'rejected') console.error('[DreamCar] AutoTrader scrape failed:', at.reason);
+    if (cz.status === 'rejected') console.error('[DreamCar] Cars.co.za scrape failed:', cz.reason);
+
+    return [
       ...(at.status === 'fulfilled' ? at.value : []),
       ...(cz.status === 'fulfilled' ? cz.value : []),
     ];
-    if (listings.length === 0) {
-      console.warn('[DreamCar] All scrapers failed — falling back to mock data');
-      return getMockListings(filters);
-    }
-    return listings;
   } finally {
     await browser.close();
   }
-}
-
-function getMockListings(filters: SearchFilters): Listing[] {
-  if (!filters.query.trim()) return MOCK_LISTINGS;
-  const q = filters.query.toLowerCase();
-  return MOCK_LISTINGS.filter(
-    (l) => l.make.toLowerCase().includes(q) || l.model.toLowerCase().includes(q) ||
-           l.variant.toLowerCase().includes(q) || `${l.make} ${l.model}`.toLowerCase().includes(q)
-  );
 }
 
 function applyPostFilters(listings: Listing[], f: SearchFilters): Listing[] {

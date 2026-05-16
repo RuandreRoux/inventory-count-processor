@@ -37,11 +37,14 @@ function SearchResults() {
   const [listings, setListings] = useState<Listing[]>([]);
   const [loading, setLoading] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [dataSource, setDataSource] = useState<"live" | "disabled" | null>(null);
 
   const fetchListings = useCallback(async (f: SearchFilters, w: RankingWeights) => {
     setLoading(true);
     try {
       const res = await fetch(`/api/search?${buildQuery(f, w)}`);
+      const source = res.headers.get("X-Data-Source");
+      setDataSource(source === "live" ? "live" : "disabled");
       const data = await res.json();
       setListings(data);
     } catch {
@@ -64,8 +67,6 @@ function SearchResults() {
     setFilters(newFilters);
     router.push(`/search?q=${encodeURIComponent(q)}`, { scroll: false });
   };
-
-  void handleNewSearch;
 
   const activeFilterCount = [
     filters.maxPrice, filters.maxMileage, filters.minYear,
@@ -110,7 +111,7 @@ function SearchResults() {
               </h1>
               {!loading && (
                 <p className="text-sm text-zinc-500 mt-0.5">
-                  {listings.length} {listings.length === 1 ? "listing" : "listings"} · ranked by DreamCar score
+                  {listings.length} {listings.length === 1 ? "listing" : "listings"} &middot; ranked by DreamCar score
                 </p>
               )}
             </div>
@@ -119,7 +120,8 @@ function SearchResults() {
               className="sm:hidden flex items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-300"
             >
               <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4h18M3 12h12M3 20h6" />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                  d="M3 4h18M3 12h12M3 20h6" />
               </svg>
               Filters
               {activeFilterCount > 0 && (
@@ -133,8 +135,24 @@ function SearchResults() {
           {loading ? (
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
               {Array.from({ length: 6 }).map((_, i) => (
-                <div key={i} className="rounded-xl border border-zinc-800 bg-[#111118] h-72 animate-pulse" />
+                <div
+                  key={i}
+                  className="rounded-xl border border-zinc-800 bg-[#111118] h-72 animate-pulse"
+                />
               ))}
+            </div>
+          ) : listings.length === 0 && dataSource === "disabled" ? (
+            <div className="flex flex-col items-center justify-center py-24 text-center">
+              <div className="mb-4 rounded-full border border-amber-500/30 bg-amber-500/10 p-5">
+                <svg className="h-8 w-8 text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
+                    d="M9.75 9.75l4.5 4.5m0-4.5l-4.5 4.5M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+              </div>
+              <h2 className="text-lg font-semibold text-white mb-2">Live scraping is not enabled</h2>
+              <p className="text-sm text-zinc-400 max-w-sm">
+                Set the <code className="rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-amber-400">SCRAPING_ENABLED=true</code> environment variable to fetch real listings from AutoTrader SA and Cars.co.za.
+              </p>
             </div>
           ) : (
             <ListingGrid listings={listings} />

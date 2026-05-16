@@ -34,7 +34,7 @@ export async function GET(req: NextRequest) {
 
   return NextResponse.json(ranked, {
     headers: {
-      'X-Data-Source': SCRAPING_ENABLED ? 'live' : 'mock',
+      'X-Data-Source': SCRAPING_ENABLED ? 'live' : 'disabled',
       'Cache-Control': 'public, max-age=60, stale-while-revalidate=1800',
     },
   });
