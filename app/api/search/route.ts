@@ -14,6 +14,9 @@ function parseWeights(raw: string | null): RankingWeights {
 }
 
 export async function GET(req: NextRequest) {
+  console.log('[DreamCar] SCRAPING_ENABLED env:', process.env.SCRAPING_ENABLED);
+  console.log('[DreamCar] SCRAPING_ENABLED flag:', SCRAPING_ENABLED);
+
   const sp = req.nextUrl.searchParams;
 
   const filters: SearchFilters = {
@@ -35,7 +38,8 @@ export async function GET(req: NextRequest) {
   return NextResponse.json(ranked, {
     headers: {
       'X-Data-Source': SCRAPING_ENABLED ? 'live' : 'disabled',
-      'Cache-Control': 'public, max-age=60, stale-while-revalidate=1800',
+      'X-Scraping-Env': process.env.SCRAPING_ENABLED ?? 'undefined',
+      'Cache-Control': 'no-store',
     },
   });
 }
