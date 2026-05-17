@@ -280,6 +280,11 @@ export async function scrapeCarsCoza(
     } catch { /* ignore */ }
   };
   page.on('response', onResponse);
+  // Forward browser console to Node stdout so [fw API] logs appear in Render
+  page.on('console', msg => {
+    const text = msg.text();
+    if (text.includes('[fw API]')) console.log('[Browser]', text);
+  });
 
   try {
     await page.setViewportSize({ width: 1280, height: 900 });
@@ -316,11 +321,11 @@ export async function scrapeCarsCoza(
       const PAGE_SIZE = 20;
       const MAX_ITEMS = 500;
       const BATCH = 10;
-      const base = `/fw/public/v3/vehicle?make_model_variant=${encodeURIComponent(mmv)}&sort=sort_rank&price_type=listing_price&page%5Blimit%5D=${PAGE_SIZE}`;
+      const base = `/fw/public/v3/vehicle?make_model_variant=${encodeURIComponent(mmv)}&sort=sort_rank&price_type=listing_price&page[limit]=${PAGE_SIZE}`;
       const opts = { credentials: 'include' as RequestCredentials, headers: { 'Accept': 'application/vnd.api+json, application/json' } };
 
       const fetchPage = (offset: number) =>
-        fetch(`${base}&page%5Boffset%5D=${offset}`, opts)
+        fetch(`${base}&page[offset]=${offset}`, opts)
           .then(r => r.ok ? r.json() as Promise<Record<string, unknown>> : null)
           .catch(() => null);
 
@@ -394,6 +399,8 @@ export async function scrapeCarsCoza(
         return allItems;
       } catch (e) { console.log('[fw API] error', String(e)); return null; }
     }, mmv);
+
+    console.log('[CarsCoza] page.evaluate result:', apiItems === null ? 'null' : Array.isArray(apiItems) ? `array(${apiItems.length})` : typeof apiItems);
 
     if (apiItems && Array.isArray(apiItems) && apiItems.length > 0) {
       console.log('[CarsCoza] fw API items:', apiItems.length);
