@@ -135,6 +135,37 @@ function extractFromVehicleArray(raw: Array<Record<string, unknown>>, source: st
   return listings;
 }
 
+function isVehicleArray(arr: unknown[]): boolean {
+  if (arr.length < 2) return false;
+  const obj = arr[0] as Record<string, unknown>;
+  const vals = Object.values(obj);
+  const hasPrice = vals.some(v => typeof v === 'number' && v > 50000 && v < 10000000);
+  const hasYear = vals.some(v =>
+    (typeof v === 'number' && v >= 2000 && v <= 2030) ||
+    (typeof v === 'string' && /^20\d{2}$/.test(v as string))
+  );
+  return hasPrice && hasYear;
+}
+
+function findVehicleArray(obj: unknown, depth = 0): Array<Record<string, unknown>> | null {
+  if (depth > 14 || !obj || typeof obj !== 'object') return null;
+  if (Array.isArray(obj)) {
+    return isVehicleArray(obj) ? (obj as Array<Record<string, unknown>>) : null;
+  }
+  const rec = obj as Record<string, unknown>;
+  for (const k of ['vehicles', 'listings', 'results', 'items', 'cars', 'ads', 'adverts', 'data', 'records', 'stock', 'hits', 'content']) {
+    if (rec[k]) {
+      const found = findVehicleArray(rec[k], depth + 1);
+      if (found) return found;
+    }
+  }
+  for (const v of Object.values(rec)) {
+    const found = findVehicleArray(v, depth + 1);
+    if (found) return found;
+  }
+  return null;
+}
+
 export async function scrapeCarsCoza(
   browser: Browser,
   query: string,
@@ -142,27 +173,16 @@ export async function scrapeCarsCoza(
 ): Promise<Listing[]> {
   const page = await browser.newPage();
 
-  // Also try intercepting JSON API in case it fires
-  const capturedVehicles: Array<Record<string, unknown>> = [];
+  // Capture ALL JSON responses from cars.co.za with URL logging
+  const capturedJsons: Array<{ url: string; json: unknown }> = [];
   const onResponse = async (response: Response) => {
     try {
       const ct = response.headers()['content-type'] ?? '';
       if (!ct.includes('json') || !response.url().includes('cars.co.za')) return;
       const json = await response.json().catch(() => null);
       if (!json) return;
-      const candidates = [
-        (json as Record<string,unknown>)['listings'],
-        (json as Record<string,unknown>)['results'],
-        (json as Record<string,unknown>)['data'],
-        Array.isArray(json) ? json : null,
-      ];
-      for (const c of candidates) {
-        if (Array.isArray(c) && c.length > 0 && typeof c[0] === 'object') {
-          capturedVehicles.push(...(c as Array<Record<string,unknown>>));
-          console.log('[CarsCoza] JSON API captured', c.length, 'items');
-          break;
-        }
-      }
+      console.log('[CarsCoza] XHR JSON from:', response.url().replace(/^https?:\/\/[^/]+/, '').substring(0, 80));
+      capturedJsons.push({ url: response.url(), json });
     } catch { /* ignore */ }
   };
   page.on('response', onResponse);
@@ -172,18 +192,29 @@ export async function scrapeCarsCoza(
     await page.setExtraHTTPHeaders(BROWSER_HEADERS);
 
     const { make, model } = normalizeMake(query);
-    const params = new URLSearchParams({ cat_make: make });
-    if (model) params.set('cat_model', model);
-    if (filters.maxPrice) params.set('price_to', String(filters.maxPrice));
-    if (filters.maxMileage) params.set('mileage_to', String(filters.maxMileage));
-    if (filters.minYear) params.set('year_from', String(filters.minYear));
 
-    const url = `${SEARCH_URL}?${params.toString()}`;
-    console.log('[CarsCoza] Navigating to:', url);
+    // Try path-based URL first — matches Cars.co.za's own URL structure
+    // /for-sale/used/toyota/fortuner/ or /usedcars/?cat_make=Toyota
+    const makeSlug = make.toLowerCase().replace(/\s+/g, '-');
+    const modelSlug = model.toLowerCase().replace(/\s+/g, '-');
+    const pathUrl = model
+      ? `https://www.cars.co.za/for-sale/used/${makeSlug}/${modelSlug}/`
+      : `https://www.cars.co.za/for-sale/used/${makeSlug}/`;
+    const paramUrl = `${SEARCH_URL}?cat_make=${encodeURIComponent(make)}${model ? `&cat_model=${encodeURIComponent(model)}` : ''}`;
 
-    const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    const status = response?.status() ?? 0;
-    console.log('[CarsCoza] HTTP status:', status);
+    console.log('[CarsCoza] Trying path URL:', pathUrl);
+    let response = await page.goto(pathUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    let status = response?.status() ?? 0;
+    console.log('[CarsCoza] Path URL status:', status);
+
+    // Fall back to query-param URL if path URL fails or redirects to home
+    const pageTitle = await page.title();
+    if (status >= 400 || pageTitle.toLowerCase().includes('home') || pageTitle.toLowerCase().includes('not found')) {
+      console.log('[CarsCoza] Path URL failed, trying param URL:', paramUrl);
+      response = await page.goto(paramUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      status = response?.status() ?? 0;
+      console.log('[CarsCoza] Param URL status:', status);
+    }
 
     if (status === 503 || status === 403) {
       console.log('[CarsCoza] Blocked — skipping');
@@ -191,83 +222,84 @@ export async function scrapeCarsCoza(
     }
 
     await page.waitForLoadState('networkidle').catch(() => null);
-    await page.waitForTimeout(3000);
-    await page.evaluate(() => window.scrollBy(0, 800));
+    // Scroll multiple times to trigger lazy-load
+    for (let i = 0; i < 4; i++) {
+      await page.waitForTimeout(1500);
+      await page.evaluate((i) => window.scrollBy(0, window.innerHeight * (i + 1)), i);
+    }
     await page.waitForTimeout(2000);
 
     console.log('[CarsCoza] Page title:', await page.title());
-
-    console.log('[CarsCoza] Captured XHR vehicles:', capturedVehicles.length);
+    console.log('[CarsCoza] Captured XHR JSONs:', capturedJsons.length);
 
     // Strategy 0: use captured XHR/fetch JSON API responses
-    // (Cars.co.za may fetch search results client-side after hydration)
-    if (capturedVehicles.length > 0) {
-      const listings = extractFromVehicleArray(capturedVehicles, 'xhrapi');
-      if (listings.length > 0) {
-        console.log('[CarsCoza] Listings from XHR API:', listings.length);
-        return listings;
+    for (const { url: xhrUrl, json } of capturedJsons) {
+      const arr = findVehicleArray(json);
+      if (arr && arr.length > 0) {
+        console.log('[CarsCoza] Found vehicle array in XHR:', xhrUrl.substring(0, 80), 'size:', arr.length);
+        const listings = extractFromVehicleArray(arr, 'xhrapi');
+        if (listings.length > 0) {
+          console.log('[CarsCoza] Listings from XHR API:', listings.length);
+          return listings;
+        }
       }
     }
 
-    // Strategy 1: Extract from window.__NEXT_DATA__ (Next.js SSR payload)
-    // Use numeric heuristics: price 50k–10M ZAR, year 2000–2030
-    const nextDataResult = await page.evaluate(() => {
-      try {
-        const el = document.getElementById('__NEXT_DATA__');
-        if (!el) return { found: false, topKeys: [] as string[], ppKeys: [] as string[], listings: null as unknown[] | null };
-        const json = JSON.parse(el.textContent ?? '{}') as Record<string, unknown>;
-        const topKeys = Object.keys(json);
-        const ppKeys = json['props'] && typeof json['props'] === 'object'
-          ? Object.keys((json['props'] as Record<string, unknown>)['pageProps'] as Record<string, unknown> ?? {})
-          : [];
-
-        function isVehicleArray(arr: unknown[]): boolean {
-          if (arr.length < 2) return false;
-          const obj = arr[0] as Record<string, unknown>;
-          const vals = Object.values(obj);
-          const hasPrice = vals.some(v => typeof v === 'number' && v > 50000 && v < 10000000);
-          const hasYear = vals.some(v =>
-            (typeof v === 'number' && v >= 2000 && v <= 2030) ||
-            (typeof v === 'string' && /^20\d{2}$/.test(v as string))
-          );
-          return hasPrice && hasYear;
+    // Strategy 1: Extract from SSR data containers (__NEXT_DATA__, __NUXT__, etc.)
+    // Dump the raw JSON from the page and process it server-side with findVehicleArray
+    const ssrJson = await page.evaluate(() => {
+      const sources: Array<{ name: string; text: string }> = [];
+      const nextEl = document.getElementById('__NEXT_DATA__');
+      if (nextEl?.textContent) sources.push({ name: '__NEXT_DATA__', text: nextEl.textContent });
+      // Some sites embed data in script tags with type=application/json
+      document.querySelectorAll('script[type="application/json"]').forEach((el, i) => {
+        if (el.textContent && el.textContent.length > 200) {
+          sources.push({ name: `script[json][${i}]`, text: el.textContent });
         }
+      });
+      // Nuxt.js uses window.__NUXT__ in a <script> tag
+      const nuxtScript = Array.from(document.querySelectorAll('script:not([src])')).find(s =>
+        s.textContent?.includes('__NUXT__') || s.textContent?.includes('window.__STATE__')
+      );
+      if (nuxtScript?.textContent) sources.push({ name: '__NUXT__', text: nuxtScript.textContent.substring(0, 50000) });
 
-        function findListings(obj: unknown, depth = 0): unknown[] | null {
-          if (depth > 14 || !obj || typeof obj !== 'object') return null;
-          if (Array.isArray(obj)) {
-            return isVehicleArray(obj) ? obj : null;
-          }
-          const rec = obj as Record<string, unknown>;
-          // Check high-priority keys first
-          for (const k of ['vehicles', 'listings', 'results', 'items', 'cars', 'ads', 'adverts', 'data', 'records', 'stock']) {
-            if (rec[k]) {
-              const found = findListings(rec[k], depth + 1);
-              if (found) return found;
-            }
-          }
-          for (const v of Object.values(rec)) {
-            const found = findListings(v, depth + 1);
-            if (found) return found;
-          }
-          return null;
-        }
-
-        const listings = findListings(json);
-        return { found: true, topKeys, ppKeys, listings, size: listings?.length ?? 0 };
-      } catch (e) {
-        return { found: false, topKeys: [] as string[], ppKeys: [] as string[], listings: null as unknown[] | null };
-      }
+      // Log what we found
+      const topLinkCount = document.querySelectorAll('a[href*="/for-sale/"]').length;
+      const htmlExcerpt = document.documentElement.outerHTML.substring(0, 500);
+      return { sources: sources.map(s => ({ name: s.name, size: s.text.length, text: s.text })), topLinkCount, htmlExcerpt };
     });
 
-    console.log('[CarsCoza] __NEXT_DATA__ found:', nextDataResult.found, '| topKeys:', nextDataResult.topKeys.join(','), '| ppKeys:', nextDataResult.ppKeys.join(','), '| array size:', nextDataResult.size);
+    console.log('[CarsCoza] SSR sources found:', ssrJson.sources.map(s => `${s.name}(${s.size}b)`).join(', '));
+    console.log('[CarsCoza] Links matching /for-sale/ on page:', ssrJson.topLinkCount);
+    console.log('[CarsCoza] HTML excerpt:', ssrJson.htmlExcerpt.substring(0, 200).replace(/\s+/g, ' '));
 
-    if (nextDataResult.listings && nextDataResult.listings.length > 0) {
-      const listings = extractFromVehicleArray(nextDataResult.listings as Array<Record<string, unknown>>, 'nextdata');
-      if (listings.length > 0) {
-        console.log('[CarsCoza] Listings from __NEXT_DATA__:', listings.length);
-        return listings;
-      }
+    for (const { name, text } of ssrJson.sources) {
+      try {
+        let json: unknown;
+        if (name === '__NUXT__') {
+          // __NUXT__ is set as JS assignment — extract the JSON portion
+          const match = text.match(/\{[\s\S]*\}/);
+          if (!match) continue;
+          json = JSON.parse(match[0]);
+        } else {
+          json = JSON.parse(text);
+        }
+        const arr = findVehicleArray(json);
+        if (arr && arr.length > 0) {
+          console.log(`[CarsCoza] Found vehicle array in ${name}: size=${arr.length}, sample keys:`, Object.keys(arr[0]).slice(0, 8).join(','));
+          const listings = extractFromVehicleArray(arr, name);
+          if (listings.length > 0) {
+            console.log(`[CarsCoza] Listings from ${name}:`, listings.length);
+            return listings;
+          }
+        } else {
+          // Log the top-level keys to help diagnose structure
+          try {
+            const parsed = json as Record<string, unknown>;
+            console.log(`[CarsCoza] ${name} top keys:`, Object.keys(parsed).slice(0, 10).join(','));
+          } catch { /* */ }
+        }
+      } catch { /* ignore parse errors */ }
     }
 
     // Strategy 2: parse listing links — URL slug contains year/make/model/location
