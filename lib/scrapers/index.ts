@@ -54,6 +54,7 @@ async function scrapeAll(filters: SearchFilters): Promise<Listing[]> {
   const { launchBrowser } = await import('./browser');
   const { scrapeAutoTrader } = await import('./autotrader');
   const { scrapeCarsCoza } = await import('./carscoza');
+  const { scrapeChangeCars } = await import('./changecars');
 
   const browser = await launchBrowser();
   try {
@@ -63,17 +64,20 @@ async function scrapeAll(filters: SearchFilters): Promise<Listing[]> {
       minYear: filters.minYear,
     };
 
-    const [at, cz] = await Promise.allSettled([
+    const [at, cz, cc] = await Promise.allSettled([
       scrapeAutoTrader(browser, filters.query, sf),
       scrapeCarsCoza(browser, filters.query, sf),
+      scrapeChangeCars(browser, filters.query, sf),
     ]);
 
     if (at.status === 'rejected') console.error('[DreamCar] AutoTrader scrape failed:', at.reason);
     if (cz.status === 'rejected') console.error('[DreamCar] Cars.co.za scrape failed:', cz.reason);
+    if (cc.status === 'rejected') console.error('[DreamCar] ChangeCars scrape failed:', cc.reason);
 
     return [
       ...(at.status === 'fulfilled' ? at.value : []),
       ...(cz.status === 'fulfilled' ? cz.value : []),
+      ...(cc.status === 'fulfilled' ? cc.value : []),
     ];
   } finally {
     await browser.close();

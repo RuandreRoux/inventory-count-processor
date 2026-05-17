@@ -1,42 +1,41 @@
 /**
- * AutoTrader SA scraper
+ * AutoTrader SA scraper.
  *
- * NOTE: autotrader.co.za blocks data-center IPs (Render/Vercel/AWS) with HTTP 503.
- * This scraper is kept for local/residential-IP use. On blocked environments it
- * returns [] immediately without wasting time.
+ * autotrader.co.za blocks data-center IPs with HTTP 503.
+ * Set SCRAPERAPI_KEY env var to route through residential proxies and bypass the block.
+ * Without the key, this scraper returns [] on a 503.
  */
 
-import type { Browser } from 'playwright-core';
+import type { Browser, BrowserContext } from 'playwright-core';
 import type { Listing } from '@/lib/types';
-import { parsePrice, parseMileage, parseYear } from './normalize';
+import { BROWSER_HEADERS, newProxiedContext } from './browser';
+import { normalizeRaw, parsePrice, parseMileage, parseYear } from './normalize';
 
 const BASE_URL = 'https://www.autotrader.co.za/cars-for-sale';
+
+const MAKES: Record<string, string> = {
+  toyota: 'Toyota', volkswagen: 'Volkswagen', vw: 'Volkswagen', ford: 'Ford',
+  bmw: 'BMW', 'mercedes-benz': 'Mercedes-Benz', mercedes: 'Mercedes-Benz',
+  hyundai: 'Hyundai', kia: 'Kia', mazda: 'Mazda', isuzu: 'Isuzu',
+  nissan: 'Nissan', honda: 'Honda', suzuki: 'Suzuki', renault: 'Renault',
+  audi: 'Audi', haval: 'Haval', 'land rover': 'Land Rover',
+};
 
 export async function scrapeAutoTrader(
   browser: Browser,
   query: string,
   filters: { maxPrice?: number; maxMileage?: number; minYear?: number },
 ): Promise<Listing[]> {
-  const page = await browser.newPage();
+  // Use a proxied context if ScraperAPI key is available, else use plain browser
+  let context: BrowserContext | null = await newProxiedContext(browser);
+  const page = context ? await context.newPage() : await browser.newPage();
+
   try {
     await page.setViewportSize({ width: 1280, height: 900 });
-    await page.setExtraHTTPHeaders({
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-      'Accept-Language': 'en-ZA,en-GB;q=0.9,en;q=0.8',
-      'Accept-Encoding': 'gzip, deflate, br',
-      'Upgrade-Insecure-Requests': '1',
-    });
+    await page.setExtraHTTPHeaders(BROWSER_HEADERS);
 
     const params = new URLSearchParams();
     const q = query.toLowerCase();
-    const MAKES: Record<string, string> = {
-      toyota: 'Toyota', volkswagen: 'Volkswagen', vw: 'Volkswagen', ford: 'Ford',
-      bmw: 'BMW', 'mercedes-benz': 'Mercedes-Benz', mercedes: 'Mercedes-Benz',
-      hyundai: 'Hyundai', kia: 'Kia', mazda: 'Mazda', isuzu: 'Isuzu',
-      nissan: 'Nissan', honda: 'Honda', suzuki: 'Suzuki', renault: 'Renault',
-      audi: 'Audi', haval: 'Haval', 'land rover': 'Land Rover',
-    };
     const matchedMake = Object.entries(MAKES).find(([k]) => q.includes(k))?.[1];
     if (matchedMake) {
       params.set('search[car_make]', matchedMake);
@@ -56,9 +55,8 @@ export async function scrapeAutoTrader(
     const status = response?.status() ?? 0;
     console.log('[AutoTrader] HTTP status:', status);
 
-    // Data-center IPs are blocked — bail immediately
     if (status === 503 || status === 403) {
-      console.log('[AutoTrader] Blocked (status', status, ') — skipping');
+      console.log('[AutoTrader] Blocked — set SCRAPERAPI_KEY env var to bypass');
       return [];
     }
 
@@ -71,7 +69,8 @@ export async function scrapeAutoTrader(
     const raw = await page.evaluate(() => {
       const adLinks = Array.from(document.querySelectorAll('a[href*="/ad/"], a[href*="/used/"]'));
       const seen = new Set<Element>();
-      const results: Array<{title:string;priceText:string;mileageText:string;locationText:string;url:string;hasServiceHistory:boolean}> = [];
+      type Extract = { title: string; priceText: string; mileageText: string; locationText: string; url: string; hasServiceHistory: boolean };
+      const results: Extract[] = [];
 
       for (const link of adLinks.slice(0, 30)) {
         let container: Element | null = link.parentElement;
@@ -94,35 +93,44 @@ export async function scrapeAutoTrader(
         const kmMatch = fullText.match(/[\d\s,]+\s*km/i);
         const mileageText = kmMatch ? kmMatch[0].trim() : '';
         const yearMatch = fullText.match(/\b(19|20)\d{2}\b/);
-        const provinces = ['gauteng', 'western cape', 'kwazulu-natal', 'eastern cape', 'limpopo', 'mpumalanga', 'north west', 'free state', 'northern cape'];
-        const matchedProvince = provinces.find(p => (fullText.toLowerCase()).includes(p)) ?? '';
+        const provinces = ['gauteng','western cape','kwazulu-natal','eastern cape','limpopo','mpumalanga','north west','free state','northern cape'];
+        const matchedProvince = provinces.find(p => fullText.toLowerCase().includes(p)) ?? '';
         const hasServiceHistory = /\b(full service|fsh|service history)\b/i.test(fullText);
 
         if (title && priceText) {
           results.push({
             title: yearMatch ? `${yearMatch[0]} ${title}` : title,
-            priceText, mileageText,
-            locationText: matchedProvince, url: absUrl, hasServiceHistory,
+            priceText, mileageText, locationText: matchedProvince, url: absUrl, hasServiceHistory,
           });
         }
       }
       return results;
     });
 
-    console.log('[AutoTrader] Listings extracted:', raw.length);
+    const debug = await page.evaluate(() => ({
+      adLinks: document.querySelectorAll('a[href*="/ad/"]').length,
+      h2: document.querySelectorAll('h2').length,
+      bodyLen: document.body?.innerHTML?.length ?? 0,
+    }));
+    console.log('[AutoTrader] Debug:', JSON.stringify(debug));
+    console.log('[AutoTrader] Raw extracts:', raw.length);
 
-    const { normalizeRaw } = await import('./normalize');
     const listings: Listing[] = [];
     for (const r of raw) {
-      const normalized = normalizeRaw(
+      const n = normalizeRaw(
         { title: r.title, priceText: r.priceText, mileageText: r.mileageText, locationText: r.locationText, url: r.url, serviceHistory: r.hasServiceHistory },
         'autotrader',
       );
-      if (normalized) listings.push(normalized);
+      if (n) listings.push(n);
     }
+    console.log('[AutoTrader] Listings extracted:', listings.length);
     return listings;
   } finally {
-    await page.close();
+    if (context) {
+      await context.close();
+    } else {
+      await page.close();
+    }
   }
 }
 
