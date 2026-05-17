@@ -104,7 +104,7 @@ function pickNum(v: Record<string, unknown>, ...keys: string[]): number {
 function extractFromVehicleArray(raw: Array<Record<string, unknown>>, source: string): Listing[] {
   const listings: Listing[] = [];
   const seenIds = new Set<string>();
-  for (const rawV of raw.slice(0, 120)) {
+  for (const rawV of raw.slice(0, 500)) {
     // Flatten JSON:API attributes into top-level (Cars.co.za uses {id, type, attributes:{...}})
     const attrs = rawV['attributes'] as Record<string, unknown> | undefined;
     const v: Record<string, unknown> = attrs && typeof attrs === 'object' ? { ...attrs, ...rawV } : rawV;
@@ -302,38 +302,54 @@ export async function scrapeCarsCoza(
       return [];
     }
 
-    await page.waitForLoadState('networkidle').catch(() => null);
-    // Scroll multiple times to trigger lazy-load
-    for (let i = 0; i < 4; i++) {
-      await page.waitForTimeout(1500);
-      await page.evaluate((i) => window.scrollBy(0, window.innerHeight * (i + 1)), i);
-    }
+    // Wait just enough for the browser session/cookies to be ready — skip heavy scroll delays
+    // when the API strategy works (saves ~8s; fallback strategies will scroll if needed)
     await page.waitForTimeout(2000);
 
     console.log('[CarsCoza] Page title:', await page.title());
     console.log('[CarsCoza] Captured XHR JSONs:', capturedJsons.length);
 
-    // Strategy 0a: call /fw/public/v3/vehicle API directly from the browser context
-    // Fetch 3 pages in parallel (Cars.co.za returns 20 per page, so this gives up to 60)
+    // Strategy 0a: call /fw/public/v3/vehicle API directly from the browser context.
+    // Fetch first page to get meta.total, then fetch all remaining pages in batches of 10.
     const apiItems = await page.evaluate(async (mmv: string) => {
-      const base = `/fw/public/v3/vehicle?make_model_variant=${encodeURIComponent(mmv)}&sort=sort_rank&price_type=listing_price&page[limit]=20`;
+      const PAGE_SIZE = 20;
+      const MAX_ITEMS = 500; // practical cap — avoids multi-second fetches for huge queries
+      const base = `/fw/public/v3/vehicle?make_model_variant=${encodeURIComponent(mmv)}&sort=sort_rank&price_type=listing_price&page[limit]=${PAGE_SIZE}`;
       const opts = { credentials: 'include' as RequestCredentials, headers: { 'Accept': 'application/vnd.api+json, application/json' } };
+
+      const fetchPage = (offset: number) =>
+        fetch(`${base}&page[offset]=${offset}`, opts)
+          .then(r => r.ok ? r.json() as Promise<Record<string, unknown>> : null)
+          .catch(() => null);
+
       try {
-        const pages = await Promise.all([0, 20, 40].map(offset =>
-          fetch(`${base}&page[offset]=${offset}`, opts)
-            .then(r => r.ok ? r.json() : null)
-            .catch(() => null)
-        ));
-        const items: unknown[] = [];
-        for (const p of pages) {
-          if (!p) break; // stop if a page failed
-          const data = (p as Record<string, unknown>).data;
-          if (!Array.isArray(data) || data.length === 0) break;
-          items.push(...data);
-          if (data.length < 20) break; // last page
+        const first = await fetchPage(0);
+        if (!first) return null;
+        const firstData = (first['data'] as unknown[]) ?? [];
+        if (firstData.length === 0) return null;
+
+        // Read total from meta so we know how many pages to fetch
+        const meta = first['meta'] as Record<string, unknown> | undefined;
+        const total = Number(meta?.['total'] ?? meta?.['count'] ?? meta?.['totalResults'] ?? firstData.length);
+        console.log('[fw API] total available:', total, '| meta keys:', meta ? Object.keys(meta).join(',') : 'none');
+
+        const toFetch = Math.min(total, MAX_ITEMS);
+        const offsets: number[] = [];
+        for (let o = PAGE_SIZE; o < toFetch; o += PAGE_SIZE) offsets.push(o);
+
+        // Fetch remaining pages in batches of 10 to stay within rate limits
+        const allItems: unknown[] = [...firstData];
+        for (let i = 0; i < offsets.length; i += 10) {
+          const batch = offsets.slice(i, i + 10);
+          const results = await Promise.all(batch.map(async o => {
+            const p = await fetchPage(o);
+            return p ? ((p['data'] as unknown[]) ?? []) : [];
+          }));
+          for (const chunk of results) allItems.push(...chunk);
         }
-        console.log('[fw API] total items fetched:', items.length);
-        return items.length > 0 ? items : null;
+
+        console.log('[fw API] fetched:', allItems.length, 'of', total);
+        return allItems;
       } catch (e) { console.log('[fw API] error', String(e)); return null; }
     }, mmv);
 
@@ -345,6 +361,14 @@ export async function scrapeCarsCoza(
         return listings;
       }
     }
+
+    // API failed — fall back to XHR/SSR/link strategies; scroll first to trigger lazy-load
+    await page.waitForLoadState('networkidle').catch(() => null);
+    for (let i = 0; i < 3; i++) {
+      await page.waitForTimeout(1500);
+      await page.evaluate((i) => window.scrollBy(0, window.innerHeight * (i + 1)), i);
+    }
+    await page.waitForTimeout(1500);
 
     // Strategy 0b: use captured XHR/fetch JSON API responses
     for (const { url: xhrUrl, json } of capturedJsons) {
