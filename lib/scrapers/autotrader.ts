@@ -9,26 +9,6 @@ import { normalizeRaw, parsePrice, parseMileage, parseYear } from './normalize';
 
 const BASE_URL = 'https://www.autotrader.co.za/cars-for-sale';
 
-const SEL = {
-  card: [
-    '[class*="listing-tile"]',
-    '[class*="ListingTile"]',
-    '[data-testid="listing"]',
-    '.b-listing',
-    'article[class*="listing"]',
-    '[class*="result"]',
-    '[class*="vehicle"]',
-    'li[class*="tile"]',
-  ].join(', '),
-
-  title: 'h2, h3, [class*="title"], [data-testid="title"], [class*="heading"]',
-  price: '[class*="price"], [class*="Price"], [data-testid="price"]',
-  mileage: '[class*="odometer"], [class*="mileage"], [class*="km"]',
-  location: '[class*="location"], [class*="city"], [class*="province"]',
-  link: 'a[href*="/ad/"], a[href*="/used-car/"], a[href]',
-  serviceHistory: '[class*="service"], [class*="history"]',
-};
-
 interface PageExtract {
   title: string;
   priceText: string;
@@ -71,38 +51,100 @@ export async function scrapeAutoTrader(
     const url = `${BASE_URL}?${params.toString()}`;
     console.log('[AutoTrader] Navigating to:', url);
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.waitForTimeout(2000);
 
     const pageTitle = await page.title();
     console.log('[AutoTrader] Page title:', pageTitle);
 
     await dismissOverlays(page);
-    await page.waitForSelector(SEL.card, { timeout: 15000 }).catch(() => null);
 
-    const debug = await page.evaluate((sel) => {
-      const cards = Array.from(document.querySelectorAll(sel.card));
-      const bodyClasses = document.body.className;
-      const firstClasses = document.querySelector('[class]')?.className?.slice(0, 200) ?? '';
-      return { cardCount: cards.length, bodyClasses: bodyClasses.slice(0, 200), firstClasses };
-    }, SEL);
-    console.log('[AutoTrader] Cards found:', debug.cardCount);
-    console.log('[AutoTrader] Body classes:', debug.bodyClasses);
-    console.log('[AutoTrader] First element classes:', debug.firstClasses);
+    // Try JSON-LD structured data first
+    const jsonLdListings = await extractFromJsonLd(page, 'autotrader');
+    if (jsonLdListings.length > 0) {
+      console.log('[AutoTrader] JSON-LD listings found:', jsonLdListings.length);
+      return jsonLdListings;
+    }
 
-    const raw = await page.evaluate((sel: typeof SEL) => {
-      const cards = Array.from(document.querySelectorAll(sel.card));
-      return cards.slice(0, 24).map((card): PageExtract => {
-        const el = (s: string) => card.querySelector(s);
-        const title = el(sel.title)?.textContent?.trim() ?? '';
-        const priceText = el(sel.price)?.textContent?.trim() ?? '';
-        const mileageText = el(sel.mileage)?.textContent?.trim() ?? '';
-        const locationText = el(sel.location)?.textContent?.trim() ?? '';
-        const href = el(sel.link)?.getAttribute('href') ?? '';
-        const url = href.startsWith('http') ? href : `https://www.autotrader.co.za${href}`;
-        const historyEl = el(sel.serviceHistory)?.textContent?.toLowerCase() ?? '';
-        const hasServiceHistory = historyEl.includes('full') || historyEl.includes('service');
-        return { title, priceText, mileageText, locationText, url, hasServiceHistory };
-      });
-    }, SEL);
+    // Fallback: find listing cards by URL pattern — links to /ad/ pages
+    const raw = await page.evaluate((): PageExtract[] => {
+      // Strategy 1: find anchor tags linking to /ad/ pages
+      const adLinks = Array.from(document.querySelectorAll('a[href*="/ad/"]'));
+      console.log('AutoTrader ad links found:', adLinks.length);
+
+      // Group by closest repeated container
+      const seen = new Set<Element>();
+      const results: PageExtract[] = [];
+
+      for (const link of adLinks.slice(0, 30)) {
+        // Walk up to find a container that looks like a card (has price + title info)
+        let container: Element | null = link.parentElement;
+        for (let i = 0; i < 6; i++) {
+          if (!container) break;
+          const text = container.textContent ?? '';
+          // Container with "R " price text is likely a listing card
+          if (text.includes('R ') && text.length > 30 && text.length < 2000) {
+            break;
+          }
+          container = container.parentElement;
+        }
+        if (!container || seen.has(container)) continue;
+        seen.add(container);
+
+        const fullText = container.textContent ?? '';
+        const href = link.getAttribute('href') ?? '';
+        const absUrl = href.startsWith('http') ? href : `https://www.autotrader.co.za${href}`;
+
+        // Extract title from h2/h3 or link text
+        const heading = container.querySelector('h1, h2, h3, h4');
+        const title = heading?.textContent?.trim() ?? link.textContent?.trim() ?? '';
+
+        // Extract price — find text matching R + digits
+        const priceMatch = fullText.match(/R\s?[\d\s,]+/);
+        const priceText = priceMatch ? priceMatch[0].trim() : '';
+
+        // Extract mileage — find text matching digits + km
+        const kmMatch = fullText.match(/[\d\s,]+\s*km/i);
+        const mileageText = kmMatch ? kmMatch[0].trim() : '';
+
+        // Extract year — 4-digit year
+        const yearMatch = fullText.match(/\b(19|20)\d{2}\b/);
+        const yearText = yearMatch ? yearMatch[0] : '';
+
+        // Location — look for province names
+        const provinces = ['gauteng', 'western cape', 'kwazulu-natal', 'eastern cape', 'limpopo', 'mpumalanga', 'north west', 'free state', 'northern cape'];
+        const lowerText = fullText.toLowerCase();
+        const matchedProvince = provinces.find(p => lowerText.includes(p)) ?? '';
+
+        // Service history
+        const hasServiceHistory = /\b(full service|fsh|service history)\b/i.test(fullText);
+
+        if (title && priceText) {
+          results.push({
+            title: `${yearText} ${title}`.trim(),
+            priceText,
+            mileageText,
+            locationText: matchedProvince,
+            url: absUrl,
+            hasServiceHistory,
+          });
+        }
+      }
+
+      return results;
+    });
+
+    console.log('[AutoTrader] Raw extracts:', raw.length);
+
+    // Log debug info about the page structure
+    const debugInfo = await page.evaluate(() => {
+      const bodyClasses = document.body.className?.slice(0, 200) ?? '';
+      const adLinkCount = document.querySelectorAll('a[href*="/ad/"]').length;
+      const h2Count = document.querySelectorAll('h2').length;
+      const h3Count = document.querySelectorAll('h3').length;
+      const priceEls = document.querySelectorAll('[class*="price"], [class*="Price"]').length;
+      return { bodyClasses, adLinkCount, h2Count, h3Count, priceEls };
+    });
+    console.log('[AutoTrader] Debug:', JSON.stringify(debugInfo));
 
     const listings: Listing[] = [];
     for (const r of raw) {
@@ -116,6 +158,49 @@ export async function scrapeAutoTrader(
     return listings;
   } finally {
     await page.close();
+  }
+}
+
+async function extractFromJsonLd(page: Page, source: 'autotrader' | 'carscoza'): Promise<Listing[]> {
+  try {
+    const jsonLdData = await page.evaluate(() => {
+      const scripts = Array.from(document.querySelectorAll('script[type="application/ld+json"]'));
+      return scripts.map(s => {
+        try { return JSON.parse(s.textContent ?? '{}'); } catch { return null; }
+      }).filter(Boolean);
+    });
+
+    const listings: Listing[] = [];
+    for (const data of jsonLdData) {
+      const items = Array.isArray(data['@graph']) ? data['@graph'] :
+                    Array.isArray(data) ? data :
+                    data['@type'] ? [data] : [];
+
+      for (const item of items) {
+        if (!item || !['Car', 'Vehicle', 'Product', 'Offer'].includes(item['@type'])) continue;
+        const name = item.name ?? '';
+        const price = item.offers?.price ?? item.price ?? 0;
+        const mileage = item.mileageFromOdometer?.value ?? item.vehicleSpecialUsage ?? 0;
+        const url = item.url ?? '';
+        if (!name || !price) continue;
+
+        const normalized = normalizeRaw(
+          {
+            title: name,
+            priceText: `R ${price}`,
+            mileageText: `${mileage} km`,
+            locationText: item.areaServed ?? item.address?.addressRegion ?? '',
+            url,
+            serviceHistory: false,
+          },
+          source,
+        );
+        if (normalized) listings.push(normalized);
+      }
+    }
+    return listings;
+  } catch {
+    return [];
   }
 }
 

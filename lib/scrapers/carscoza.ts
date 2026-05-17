@@ -2,33 +2,21 @@
  * Cars.co.za scraper
  */
 
-import type { Browser } from 'playwright-core';
+import type { Page, Browser } from 'playwright-core';
 import type { Listing } from '@/lib/types';
 import { BROWSER_HEADERS } from './browser';
 import { normalizeRaw } from './normalize';
 
 const BASE_URL = 'https://www.cars.co.za/used-cars-for-sale';
 
-const SEL = {
-  card: [
-    '[class*="vehicle-card"]',
-    '[class*="listing-item"]',
-    '[class*="car-item"]',
-    '[class*="result-item"]',
-    'article[class*="car"]',
-    '.vehicle-result',
-    '[class*="VehicleCard"]',
-    '[class*="SearchResult"]',
-    'li[class*="vehicle"]',
-  ].join(', '),
-
-  title: 'h2, h3, [class*="title"], [class*="heading"], [class*="Title"]',
-  price: '[class*="price"], [class*="Price"]',
-  mileage: '[class*="mileage"], [class*="km"], [class*="odometer"], [class*="Mileage"]',
-  location: '[class*="location"], [class*="city"], [class*="area"], [class*="Location"]',
-  link: 'a[href*="/used-car/"], a[href*="/car/"], a[href]',
-  serviceHistory: '[class*="service"], [class*="history"], [class*="fsh"]',
-};
+interface PageExtract {
+  title: string;
+  priceText: string;
+  mileageText: string;
+  locationText: string;
+  url: string;
+  hasServiceHistory: boolean;
+}
 
 function toSlug(s: string): string {
   return s.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
@@ -59,39 +47,95 @@ export async function scrapeCarsCoza(
 
     console.log('[CarsCoza] Navigating to:', url);
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.waitForTimeout(2000);
 
     const pageTitle = await page.title();
     console.log('[CarsCoza] Page title:', pageTitle);
 
     await page.$('button[id*="accept"], button[class*="accept"]').then((b) => b?.click()).catch(() => null);
     await page.keyboard.press('Escape').catch(() => null);
-    await page.waitForSelector(SEL.card, { timeout: 15000 }).catch(() => null);
 
-    const debug = await page.evaluate((sel) => {
-      const cards = Array.from(document.querySelectorAll(sel.card));
-      const bodyClasses = document.body.className;
-      const firstClasses = document.querySelector('[class]')?.className?.slice(0, 200) ?? '';
-      return { cardCount: cards.length, bodyClasses: bodyClasses.slice(0, 200), firstClasses };
-    }, SEL);
-    console.log('[CarsCoza] Cards found:', debug.cardCount);
-    console.log('[CarsCoza] Body classes:', debug.bodyClasses);
-    console.log('[CarsCoza] First element classes:', debug.firstClasses);
+    // Try JSON-LD first
+    const jsonLdListings = await extractFromJsonLd(page, 'carscoza');
+    if (jsonLdListings.length > 0) {
+      console.log('[CarsCoza] JSON-LD listings found:', jsonLdListings.length);
+      return jsonLdListings;
+    }
 
-    const raw = await page.evaluate((sel: typeof SEL) => {
-      const cards = Array.from(document.querySelectorAll(sel.card));
-      return cards.slice(0, 24).map((card) => {
-        const el = (s: string) => card.querySelector(s);
-        const title = el(sel.title)?.textContent?.trim() ?? '';
-        const priceText = el(sel.price)?.textContent?.trim() ?? '';
-        const mileageText = el(sel.mileage)?.textContent?.trim() ?? '';
-        const locationText = el(sel.location)?.textContent?.trim() ?? '';
-        const href = el(sel.link)?.getAttribute('href') ?? '';
-        const listingUrl = href.startsWith('http') ? href : `https://www.cars.co.za${href}`;
-        const historyText = el(sel.serviceHistory)?.textContent?.toLowerCase() ?? '';
-        const hasServiceHistory = historyText.includes('full') || historyText.includes('fsh');
-        return { title, priceText, mileageText, locationText, url: listingUrl, hasServiceHistory };
-      });
-    }, SEL);
+    // Fallback: DOM-based extraction using URL patterns
+    const raw = await page.evaluate((): PageExtract[] => {
+      // Cars.co.za links typically contain /used-car/ or /car/
+      const adLinks = Array.from(document.querySelectorAll('a[href*="/used-car/"], a[href*="/car/"]'))
+        .filter(a => {
+          const href = (a as HTMLAnchorElement).href ?? '';
+          // Filter out navigation/make/model links — listing URLs typically have at least 3 path segments
+          return href.split('/').length >= 6;
+        });
+
+      console.log('CarsCoza ad links found:', adLinks.length);
+
+      const seen = new Set<Element>();
+      const results: PageExtract[] = [];
+
+      for (const link of adLinks.slice(0, 30)) {
+        // Walk up to find listing container
+        let container: Element | null = link.parentElement;
+        for (let i = 0; i < 6; i++) {
+          if (!container) break;
+          const text = container.textContent ?? '';
+          if (text.includes('R ') && text.length > 30 && text.length < 2000) break;
+          container = container.parentElement;
+        }
+        if (!container || seen.has(container)) continue;
+        seen.add(container);
+
+        const fullText = container.textContent ?? '';
+        const href = (link as HTMLAnchorElement).href ?? link.getAttribute('href') ?? '';
+        const absUrl = href.startsWith('http') ? href : `https://www.cars.co.za${href}`;
+
+        const heading = container.querySelector('h1, h2, h3, h4');
+        const title = heading?.textContent?.trim() ?? link.textContent?.trim() ?? '';
+
+        const priceMatch = fullText.match(/R\s?[\d\s,]+/);
+        const priceText = priceMatch ? priceMatch[0].trim() : '';
+
+        const kmMatch = fullText.match(/[\d\s,]+\s*km/i);
+        const mileageText = kmMatch ? kmMatch[0].trim() : '';
+
+        const yearMatch = fullText.match(/\b(19|20)\d{2}\b/);
+        const yearText = yearMatch ? yearMatch[0] : '';
+
+        const provinces = ['gauteng', 'western cape', 'kwazulu-natal', 'eastern cape', 'limpopo', 'mpumalanga', 'north west', 'free state', 'northern cape'];
+        const lowerText = fullText.toLowerCase();
+        const matchedProvince = provinces.find(p => lowerText.includes(p)) ?? '';
+
+        const hasServiceHistory = /\b(full service|fsh|service history)\b/i.test(fullText);
+
+        if (title && priceText) {
+          results.push({
+            title: `${yearText} ${title}`.trim(),
+            priceText,
+            mileageText,
+            locationText: matchedProvince,
+            url: absUrl,
+            hasServiceHistory,
+          });
+        }
+      }
+
+      return results;
+    });
+
+    console.log('[CarsCoza] Raw extracts:', raw.length);
+
+    const debugInfo = await page.evaluate(() => {
+      const bodyClasses = document.body.className?.slice(0, 200) ?? '';
+      const carLinks = document.querySelectorAll('a[href*="/used-car/"], a[href*="/car/"]').length;
+      const h2Count = document.querySelectorAll('h2').length;
+      const h3Count = document.querySelectorAll('h3').length;
+      return { bodyClasses, carLinks, h2Count, h3Count };
+    });
+    console.log('[CarsCoza] Debug:', JSON.stringify(debugInfo));
 
     const listings: Listing[] = [];
     for (const r of raw) {
@@ -105,5 +149,48 @@ export async function scrapeCarsCoza(
     return listings;
   } finally {
     await page.close();
+  }
+}
+
+async function extractFromJsonLd(page: Page, source: 'autotrader' | 'carscoza'): Promise<Listing[]> {
+  try {
+    const jsonLdData = await page.evaluate(() => {
+      const scripts = Array.from(document.querySelectorAll('script[type="application/ld+json"]'));
+      return scripts.map(s => {
+        try { return JSON.parse(s.textContent ?? '{}'); } catch { return null; }
+      }).filter(Boolean);
+    });
+
+    const listings: Listing[] = [];
+    for (const data of jsonLdData) {
+      const items = Array.isArray(data['@graph']) ? data['@graph'] :
+                    Array.isArray(data) ? data :
+                    data['@type'] ? [data] : [];
+
+      for (const item of items) {
+        if (!item || !['Car', 'Vehicle', 'Product', 'Offer'].includes(item['@type'])) continue;
+        const name = item.name ?? '';
+        const price = item.offers?.price ?? item.price ?? 0;
+        const mileage = item.mileageFromOdometer?.value ?? 0;
+        const url = item.url ?? '';
+        if (!name || !price) continue;
+
+        const normalized = normalizeRaw(
+          {
+            title: name,
+            priceText: `R ${price}`,
+            mileageText: `${mileage} km`,
+            locationText: item.areaServed ?? item.address?.addressRegion ?? '',
+            url,
+            serviceHistory: false,
+          },
+          source,
+        );
+        if (normalized) listings.push(normalized);
+      }
+    }
+    return listings;
+  } catch {
+    return [];
   }
 }
