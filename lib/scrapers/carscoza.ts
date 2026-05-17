@@ -310,17 +310,29 @@ export async function scrapeCarsCoza(
     console.log('[CarsCoza] Captured XHR JSONs:', capturedJsons.length);
 
     // Strategy 0a: call /fw/public/v3/vehicle API directly from the browser context.
-    // Fetch first page to get meta.total, then fetch all remaining pages in batches of 10.
+    // Fetch first page, detect total from meta (tries all common field names + links.last URL),
+    // then batch-fetch remaining pages. Falls back to probing until empty if total is unknown.
     const apiItems = await page.evaluate(async (mmv: string) => {
       const PAGE_SIZE = 20;
-      const MAX_ITEMS = 500; // practical cap — avoids multi-second fetches for huge queries
-      const base = `/fw/public/v3/vehicle?make_model_variant=${encodeURIComponent(mmv)}&sort=sort_rank&price_type=listing_price&page[limit]=${PAGE_SIZE}`;
+      const MAX_ITEMS = 500;
+      const BATCH = 10;
+      const base = `/fw/public/v3/vehicle?make_model_variant=${encodeURIComponent(mmv)}&sort=sort_rank&price_type=listing_price&page%5Blimit%5D=${PAGE_SIZE}`;
       const opts = { credentials: 'include' as RequestCredentials, headers: { 'Accept': 'application/vnd.api+json, application/json' } };
 
       const fetchPage = (offset: number) =>
-        fetch(`${base}&page[offset]=${offset}`, opts)
+        fetch(`${base}&page%5Boffset%5D=${offset}`, opts)
           .then(r => r.ok ? r.json() as Promise<Record<string, unknown>> : null)
           .catch(() => null);
+
+      const fetchBatch = async (offsets: number[]) => {
+        const results = await Promise.all(offsets.map(async o => {
+          const p = await fetchPage(o);
+          return p ? ((p['data'] as unknown[]) ?? []) : [];
+        }));
+        const items: unknown[] = [];
+        for (const chunk of results) items.push(...chunk);
+        return items;
+      };
 
       try {
         const first = await fetchPage(0);
@@ -328,27 +340,57 @@ export async function scrapeCarsCoza(
         const firstData = (first['data'] as unknown[]) ?? [];
         if (firstData.length === 0) return null;
 
-        // Read total from meta so we know how many pages to fetch
+        // Try every common JSON:API meta field name for total count
         const meta = first['meta'] as Record<string, unknown> | undefined;
-        const total = Number(meta?.['total'] ?? meta?.['count'] ?? meta?.['totalResults'] ?? firstData.length);
-        console.log('[fw API] total available:', total, '| meta keys:', meta ? Object.keys(meta).join(',') : 'none');
+        const links = first['links'] as Record<string, unknown> | undefined;
+        let total: number | null = null;
 
-        const toFetch = Math.min(total, MAX_ITEMS);
-        const offsets: number[] = [];
-        for (let o = PAGE_SIZE; o < toFetch; o += PAGE_SIZE) offsets.push(o);
-
-        // Fetch remaining pages in batches of 10 to stay within rate limits
-        const allItems: unknown[] = [...firstData];
-        for (let i = 0; i < offsets.length; i += 10) {
-          const batch = offsets.slice(i, i + 10);
-          const results = await Promise.all(batch.map(async o => {
-            const p = await fetchPage(o);
-            return p ? ((p['data'] as unknown[]) ?? []) : [];
-          }));
-          for (const chunk of results) allItems.push(...chunk);
+        if (meta) {
+          const raw = meta['total'] ?? meta['total_count'] ?? meta['totalResults'] ??
+                      meta['total_results'] ?? meta['count'] ?? meta['record_count'] ??
+                      meta['totalRecords'] ?? meta['total-count'] ?? null;
+          if (raw !== null && raw !== undefined) total = Number(raw);
+        }
+        // Fall back to links.last URL: extract offset + PAGE_SIZE
+        if ((!total || isNaN(total)) && links) {
+          const lastHref = typeof links['last'] === 'string' ? links['last']
+                         : (links['last'] as Record<string, unknown>)?.['href'] as string | undefined;
+          if (lastHref) {
+            const m = lastHref.match(/page(?:%5B|\[)offset(?:%5D|\])=(\d+)/i);
+            if (m) total = parseInt(m[1], 10) + PAGE_SIZE;
+          }
         }
 
-        console.log('[fw API] fetched:', allItems.length, 'of', total);
+        console.log('[fw API] total:', total, '| meta:', JSON.stringify(meta)?.substring(0, 300));
+
+        const allItems: unknown[] = [...firstData];
+
+        if (total && !isNaN(total) && total > PAGE_SIZE) {
+          // Known total — build all offsets upfront
+          const toFetch = Math.min(total, MAX_ITEMS);
+          const offsets: number[] = [];
+          for (let o = PAGE_SIZE; o < toFetch; o += PAGE_SIZE) offsets.push(o);
+          for (let i = 0; i < offsets.length; i += BATCH) {
+            const chunk = await fetchBatch(offsets.slice(i, i + BATCH));
+            allItems.push(...chunk);
+          }
+        } else {
+          // Unknown total — probe pages until we get an empty one
+          let offset = PAGE_SIZE;
+          while (allItems.length < MAX_ITEMS) {
+            const batchOffsets: number[] = [];
+            for (let j = 0; j < BATCH && offset + j * PAGE_SIZE < MAX_ITEMS; j++) {
+              batchOffsets.push(offset + j * PAGE_SIZE);
+            }
+            if (batchOffsets.length === 0) break;
+            const chunk = await fetchBatch(batchOffsets);
+            if (chunk.length === 0) break;
+            allItems.push(...chunk);
+            offset += batchOffsets.length * PAGE_SIZE;
+          }
+        }
+
+        console.log('[fw API] fetched:', allItems.length);
         return allItems;
       } catch (e) { console.log('[fw API] error', String(e)); return null; }
     }, mmv);
