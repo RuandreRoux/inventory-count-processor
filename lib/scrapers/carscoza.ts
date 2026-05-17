@@ -99,18 +99,29 @@ function pickNum(v: Record<string, unknown>, ...keys: string[]): number {
 function extractFromVehicleArray(raw: Array<Record<string, unknown>>, source: string): Listing[] {
   const listings: Listing[] = [];
   const seenIds = new Set<string>();
-  for (const v of raw.slice(0, 60)) {
+  for (const rawV of raw.slice(0, 60)) {
+    // Flatten JSON:API attributes into top-level (Cars.co.za uses {id, type, attributes:{...}})
+    const attrs = rawV['attributes'] as Record<string, unknown> | undefined;
+    const v: Record<string, unknown> = attrs && typeof attrs === 'object' ? { ...attrs, ...rawV } : rawV;
+
     const make = pickStr(v, 'make', 'Make', 'manufacturer', 'makeDescription', 'makeName', 'brand');
     const model = pickStr(v, 'model', 'Model', 'modelDescription', 'modelName');
     const variant = pickStr(v, 'variant', 'Variant', 'derivative', 'trim', 'variantDescription', 'description', 'title');
     const year = pickNum(v, 'year', 'Year', 'modelYear', 'vehicleYear');
     const price = pickNum(v, 'price', 'Price', 'sellingPrice', 'askingPrice', 'listPrice', 'vehiclePrice', 'retail');
     const mileage = pickNum(v, 'mileage', 'Mileage', 'km', 'odometer', 'kilometres', 'kilometers', 'kms');
-    const rawUrl = pickStr(v, 'url', 'link', 'listingUrl', 'permalink', 'adUrl', 'href', 'detailUrl');
-    const imageUrl = pickStr(v, 'image', 'imageUrl', 'thumbnail', 'photo', 'primaryImage', 'mainImage', 'heroImage', 'imgUrl', 'picture');
-    const locationText = pickStr(v, 'province', 'region', 'city', 'location', 'area', 'suburb');
+    const rawUrl = pickStr(v, 'url', 'link', 'listingUrl', 'permalink', 'adUrl', 'href', 'detailUrl', 'slug');
+    // JSON:API images may be nested: images[0].url or photos[0].url
+    let imageUrl = pickStr(v, 'image', 'imageUrl', 'thumbnail', 'photo', 'primaryImage', 'mainImage', 'heroImage', 'imgUrl', 'picture');
+    if (!imageUrl) {
+      const imgArr = (v['images'] ?? v['photos'] ?? v['media']) as Array<Record<string, unknown>> | undefined;
+      if (Array.isArray(imgArr) && imgArr.length > 0) {
+        imageUrl = pickStr(imgArr[0], 'url', 'src', 'href', 'original', 'large', 'medium', 'small');
+      }
+    }
+    const locationText = pickStr(v, 'province', 'region', 'city', 'location', 'area', 'suburb', 'town');
     if (!make || !price || !year) {
-      console.log(`[CarsCoza] Skip (${source}): make=${make} price=${price} year=${year} keys=${Object.keys(v).slice(0, 10).join(',')}`);
+      if (source !== 'link') console.log(`[CarsCoza] Skip (${source}): make=${make} price=${price} year=${year} keys=${Object.keys(v).slice(0, 12).join(',')}`);
       continue;
     }
     const title = `${year} ${make} ${model} ${variant}`.trim();
@@ -138,13 +149,25 @@ function extractFromVehicleArray(raw: Array<Record<string, unknown>>, source: st
 function isVehicleArray(arr: unknown[]): boolean {
   if (arr.length < 2) return false;
   const obj = arr[0] as Record<string, unknown>;
-  const vals = Object.values(obj);
-  const hasPrice = vals.some(v => typeof v === 'number' && v > 50000 && v < 10000000);
-  const hasYear = vals.some(v =>
-    (typeof v === 'number' && v >= 2000 && v <= 2030) ||
-    (typeof v === 'string' && /^20\d{2}$/.test(v as string))
-  );
-  return hasPrice && hasYear;
+
+  function hasVehicleFields(o: Record<string, unknown>): boolean {
+    const vals = Object.values(o);
+    const hasPrice = vals.some(v => typeof v === 'number' && v > 50000 && v < 10000000);
+    const hasYear = vals.some(v =>
+      (typeof v === 'number' && v >= 2000 && v <= 2030) ||
+      (typeof v === 'string' && /^20\d{2}$/.test(v as string))
+    );
+    return hasPrice && hasYear;
+  }
+
+  // Direct fields
+  if (hasVehicleFields(obj)) return true;
+  // JSON:API: {id, type, attributes: {price, year, ...}}
+  const attrs = obj['attributes'];
+  if (attrs && typeof attrs === 'object' && !Array.isArray(attrs)) {
+    if (hasVehicleFields(attrs as Record<string, unknown>)) return true;
+  }
+  return false;
 }
 
 function findVehicleArray(obj: unknown, depth = 0): Array<Record<string, unknown>> | null {
@@ -193,28 +216,15 @@ export async function scrapeCarsCoza(
 
     const { make, model } = normalizeMake(query);
 
-    // Try path-based URL first — matches Cars.co.za's own URL structure
-    // /for-sale/used/toyota/fortuner/ or /usedcars/?cat_make=Toyota
-    const makeSlug = make.toLowerCase().replace(/\s+/g, '-');
-    const modelSlug = model.toLowerCase().replace(/\s+/g, '-');
-    const pathUrl = model
-      ? `https://www.cars.co.za/for-sale/used/${makeSlug}/${modelSlug}/`
-      : `https://www.cars.co.za/for-sale/used/${makeSlug}/`;
-    const paramUrl = `${SEARCH_URL}?cat_make=${encodeURIComponent(make)}${model ? `&cat_model=${encodeURIComponent(model)}` : ''}`;
+    // Cars.co.za search URL — confirmed working format from site
+    // make_model_variant=Toyota[Fortuner] or just Toyota for make-only
+    const mmv = model ? `${make}[${model}]` : make;
+    const searchUrl = `${SEARCH_URL}?make_model_variant=${encodeURIComponent(mmv)}&sort=sort_rank&price_type=listing_price&P=1`;
+    console.log('[CarsCoza] Navigating to:', searchUrl);
 
-    console.log('[CarsCoza] Trying path URL:', pathUrl);
-    let response = await page.goto(pathUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    let status = response?.status() ?? 0;
-    console.log('[CarsCoza] Path URL status:', status);
-
-    // Fall back to query-param URL if path URL fails or redirects to home
-    const pageTitle = await page.title();
-    if (status >= 400 || pageTitle.toLowerCase().includes('home') || pageTitle.toLowerCase().includes('not found')) {
-      console.log('[CarsCoza] Path URL failed, trying param URL:', paramUrl);
-      response = await page.goto(paramUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-      status = response?.status() ?? 0;
-      console.log('[CarsCoza] Param URL status:', status);
-    }
+    const response = await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    const status = response?.status() ?? 0;
+    console.log('[CarsCoza] HTTP status:', status);
 
     if (status === 503 || status === 403) {
       console.log('[CarsCoza] Blocked — skipping');
@@ -232,7 +242,31 @@ export async function scrapeCarsCoza(
     console.log('[CarsCoza] Page title:', await page.title());
     console.log('[CarsCoza] Captured XHR JSONs:', capturedJsons.length);
 
-    // Strategy 0: use captured XHR/fetch JSON API responses
+    // Strategy 0a: call /fw/public/v3/vehicle API directly from the browser context
+    // Cars.co.za uses this REST endpoint — browser has session cookies, so it's authenticated
+    const apiJson = await page.evaluate(async (mmv: string) => {
+      try {
+        const url = `/fw/public/v3/vehicle?make_model_variant=${encodeURIComponent(mmv)}&sort=sort_rank&price_type=listing_price&page[limit]=50&page[offset]=0`;
+        const res = await fetch(url, { credentials: 'include', headers: { 'Accept': 'application/vnd.api+json, application/json' } });
+        if (!res.ok) { console.log('[fw API] status', res.status); return null; }
+        return await res.json();
+      } catch (e) { console.log('[fw API] error', String(e)); return null; }
+    }, mmv);
+
+    if (apiJson) {
+      console.log('[CarsCoza] fw API response keys:', Object.keys(apiJson as Record<string, unknown>).join(','));
+      const arr = findVehicleArray(apiJson);
+      if (arr && arr.length > 0) {
+        console.log('[CarsCoza] fw API vehicle array size:', arr.length, '| sample keys:', Object.keys(arr[0]).slice(0, 8).join(','));
+        const listings = extractFromVehicleArray(arr, 'fwapi');
+        if (listings.length > 0) {
+          console.log('[CarsCoza] Listings from fw API:', listings.length);
+          return listings;
+        }
+      }
+    }
+
+    // Strategy 0b: use captured XHR/fetch JSON API responses
     for (const { url: xhrUrl, json } of capturedJsons) {
       const arr = findVehicleArray(json);
       if (arr && arr.length > 0) {
