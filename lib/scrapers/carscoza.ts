@@ -104,7 +104,7 @@ function pickNum(v: Record<string, unknown>, ...keys: string[]): number {
 function extractFromVehicleArray(raw: Array<Record<string, unknown>>, source: string): Listing[] {
   const listings: Listing[] = [];
   const seenIds = new Set<string>();
-  for (const rawV of raw.slice(0, 60)) {
+  for (const rawV of raw.slice(0, 120)) {
     // Flatten JSON:API attributes into top-level (Cars.co.za uses {id, type, attributes:{...}})
     const attrs = rawV['attributes'] as Record<string, unknown> | undefined;
     const v: Record<string, unknown> = attrs && typeof attrs === 'object' ? { ...attrs, ...rawV } : rawV;
@@ -314,26 +314,35 @@ export async function scrapeCarsCoza(
     console.log('[CarsCoza] Captured XHR JSONs:', capturedJsons.length);
 
     // Strategy 0a: call /fw/public/v3/vehicle API directly from the browser context
-    // Cars.co.za uses this REST endpoint — browser has session cookies, so it's authenticated
-    const apiJson = await page.evaluate(async (mmv: string) => {
+    // Fetch 3 pages in parallel (Cars.co.za returns 20 per page, so this gives up to 60)
+    const apiItems = await page.evaluate(async (mmv: string) => {
+      const base = `/fw/public/v3/vehicle?make_model_variant=${encodeURIComponent(mmv)}&sort=sort_rank&price_type=listing_price&page[limit]=20`;
+      const opts = { credentials: 'include' as RequestCredentials, headers: { 'Accept': 'application/vnd.api+json, application/json' } };
       try {
-        const url = `/fw/public/v3/vehicle?make_model_variant=${encodeURIComponent(mmv)}&sort=sort_rank&price_type=listing_price&page[limit]=50&page[offset]=0`;
-        const res = await fetch(url, { credentials: 'include', headers: { 'Accept': 'application/vnd.api+json, application/json' } });
-        if (!res.ok) { console.log('[fw API] status', res.status); return null; }
-        return await res.json();
+        const pages = await Promise.all([0, 20, 40].map(offset =>
+          fetch(`${base}&page[offset]=${offset}`, opts)
+            .then(r => r.ok ? r.json() : null)
+            .catch(() => null)
+        ));
+        const items: unknown[] = [];
+        for (const p of pages) {
+          if (!p) break; // stop if a page failed
+          const data = (p as Record<string, unknown>).data;
+          if (!Array.isArray(data) || data.length === 0) break;
+          items.push(...data);
+          if (data.length < 20) break; // last page
+        }
+        console.log('[fw API] total items fetched:', items.length);
+        return items.length > 0 ? items : null;
       } catch (e) { console.log('[fw API] error', String(e)); return null; }
     }, mmv);
 
-    if (apiJson) {
-      console.log('[CarsCoza] fw API response keys:', Object.keys(apiJson as Record<string, unknown>).join(','));
-      const arr = findVehicleArray(apiJson);
-      if (arr && arr.length > 0) {
-        console.log('[CarsCoza] fw API vehicle array size:', arr.length, '| sample keys:', Object.keys(arr[0]).slice(0, 8).join(','));
-        const listings = extractFromVehicleArray(arr, 'fwapi');
-        if (listings.length > 0) {
-          console.log('[CarsCoza] Listings from fw API:', listings.length);
-          return listings;
-        }
+    if (apiItems && Array.isArray(apiItems) && apiItems.length > 0) {
+      console.log('[CarsCoza] fw API items:', apiItems.length);
+      const listings = extractFromVehicleArray(apiItems as Array<Record<string, unknown>>, 'fwapi');
+      if (listings.length > 0) {
+        console.log('[CarsCoza] Listings from fw API:', listings.length);
+        return listings;
       }
     }
 
