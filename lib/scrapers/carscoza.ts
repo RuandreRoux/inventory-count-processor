@@ -304,7 +304,9 @@ export async function scrapeCarsCoza(
     const { make, model } = normalizeMake(query);
 
     const mmv = model ? `${make}[${model}]` : make;
-    const searchUrl = `${SEARCH_URL}?make_model_variant=${encodeURIComponent(mmv)}&sort=sort_rank&price_type=listing_price&P=1`;
+    // Cars.co.za requires unencoded brackets: Toyota[Fortuner] not Toyota%5BFortuner%5D
+    const mmvEncoded = encodeURIComponent(mmv).replace(/%5B/gi, '[').replace(/%5D/gi, ']');
+    const searchUrl = `${SEARCH_URL}?make_model_variant=${mmvEncoded}&sort=sort_rank&price_type=listing_price&P=1`;
     console.log('[CarsCoza] Navigating to:', searchUrl);
 
     const response = await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
@@ -322,10 +324,10 @@ export async function scrapeCarsCoza(
 
     // Strategy A: use the captured auth headers to call the /fw/public/v3/vehicle API directly.
     // This is the only reliable multi-page approach — SSR only renders page 1.
-    const apiItems = await page.evaluate(async ({ mmv, extraHeaders }: { mmv: string; extraHeaders: Record<string, string> }) => {
+    const apiItems = await page.evaluate(async ({ mmvEncoded, extraHeaders }: { mmvEncoded: string; extraHeaders: Record<string, string> }) => {
       const PAGE_SIZE = 20;
       const MAX_ITEMS = 300;
-      const base = `/fw/public/v3/vehicle?make_model_variant=${encodeURIComponent(mmv)}&sort=sort_rank&price_type=listing_price&page[limit]=${PAGE_SIZE}`;
+      const base = `/fw/public/v3/vehicle?make_model_variant=${mmvEncoded}&sort=sort_rank&price_type=listing_price&page[limit]=${PAGE_SIZE}`;
       const headers: Record<string, string> = { 'Accept': 'application/vnd.api+json, application/json', ...extraHeaders };
 
       const fetchPage = (offset: number) =>
@@ -365,7 +367,7 @@ export async function scrapeCarsCoza(
         console.log('[fw API] fetched total:', allItems.length);
         return allItems;
       } catch (e) { console.log('[fw API] error:', String(e)); return null; }
-    }, { mmv, extraHeaders: capturedAuthHeaders });
+    }, { mmvEncoded, extraHeaders: capturedAuthHeaders });
 
     if (apiItems && Array.isArray(apiItems) && apiItems.length > 0) {
       const listings = extractFromVehicleArray(apiItems as Array<Record<string, unknown>>, 'api');
