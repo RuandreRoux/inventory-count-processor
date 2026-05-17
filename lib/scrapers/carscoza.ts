@@ -280,11 +280,6 @@ export async function scrapeCarsCoza(
     } catch { /* ignore */ }
   };
   page.on('response', onResponse);
-  // Forward browser console to Node stdout so [fw API] logs appear in Render
-  page.on('console', msg => {
-    const text = msg.text();
-    if (text.includes('[fw API]')) console.log('[Browser]', text);
-  });
 
   try {
     await page.setViewportSize({ width: 1280, height: 900 });
@@ -312,184 +307,53 @@ export async function scrapeCarsCoza(
     await page.waitForTimeout(2000);
 
     console.log('[CarsCoza] Page title:', await page.title());
-    console.log('[CarsCoza] Captured XHR JSONs:', capturedJsons.length);
 
-    // Strategy 0a: call /fw/public/v3/vehicle API directly from the browser context.
-    // Fetch first page, detect total from meta (tries all common field names + links.last URL),
-    // then batch-fetch remaining pages. Falls back to probing until empty if total is unknown.
-    const apiItems = await page.evaluate(async (mmv: string) => {
-      const PAGE_SIZE = 20;
-      const MAX_ITEMS = 500;
-      const BATCH = 10;
-      const base = `/fw/public/v3/vehicle?make_model_variant=${encodeURIComponent(mmv)}&sort=sort_rank&price_type=listing_price&page[limit]=${PAGE_SIZE}`;
-      const opts = { credentials: 'include' as RequestCredentials, headers: { 'Accept': 'application/vnd.api+json, application/json' } };
+    // Cars.co.za serves listings via SSR (__NEXT_DATA__), not via a client-side API.
+    // The /fw/public/v3/vehicle API requires auth headers we don't have.
+    // Solution: navigate P=1, P=2, P=3 … and extract 20 items per page from __NEXT_DATA__.
 
-      const fetchPage = (offset: number) =>
-        fetch(`${base}&page[offset]=${offset}`, opts)
-          .then(r => r.ok ? r.json() as Promise<Record<string, unknown>> : null)
-          .catch(() => null);
+    const extractNextData = async (): Promise<Array<Record<string, unknown>>> => {
+      const text = await page.evaluate(() => {
+        const el = document.getElementById('__NEXT_DATA__');
+        return el?.textContent ?? null;
+      }).catch(() => null);
+      if (!text) return [];
+      try { return findVehicleArray(JSON.parse(text)) ?? []; } catch { return []; }
+    };
 
-      const fetchBatch = async (offsets: number[]) => {
-        const results = await Promise.all(offsets.map(async o => {
-          const p = await fetchPage(o);
-          return p ? ((p['data'] as unknown[]) ?? []) : [];
-        }));
-        const items: unknown[] = [];
-        for (const chunk of results) items.push(...chunk);
-        return items;
-      };
+    const allRawVehicles: Array<Record<string, unknown>> = [];
+    const navStart = Date.now();
+    const TIME_LIMIT_MS = 42_000; // leave buffer before 60 s maxDuration
+    const MAX_PAGES = 15;
 
+    const page1Items = await extractNextData();
+    allRawVehicles.push(...page1Items);
+    console.log('[CarsCoza] SSR p1:', page1Items.length, 'items');
+
+    for (let p = 2; p <= MAX_PAGES; p++) {
+      if (Date.now() - navStart > TIME_LIMIT_MS) { console.log('[CarsCoza] Time limit at p', p); break; }
       try {
-        const first = await fetchPage(0);
-        if (!first) return null;
-        const firstData = (first['data'] as unknown[]) ?? [];
-        if (firstData.length === 0) return null;
+        const url = `${SEARCH_URL}?make_model_variant=${encodeURIComponent(mmv)}&sort=sort_rank&price_type=listing_price&P=${p}`;
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 10_000 });
+        const items = await extractNextData();
+        if (items.length === 0) { console.log('[CarsCoza] p', p, 'empty — done'); break; }
+        allRawVehicles.push(...items);
+        console.log('[CarsCoza] SSR p' + p + ':', items.length, 'items, total:', allRawVehicles.length);
+      } catch (e) {
+        console.log('[CarsCoza] p', p, 'error:', String(e).substring(0, 80));
+        break;
+      }
+    }
 
-        // Try every common JSON:API meta field name for total count
-        const meta = first['meta'] as Record<string, unknown> | undefined;
-        const links = first['links'] as Record<string, unknown> | undefined;
-        let total: number | null = null;
-
-        if (meta) {
-          const raw = meta['total'] ?? meta['total_count'] ?? meta['totalResults'] ??
-                      meta['total_results'] ?? meta['count'] ?? meta['record_count'] ??
-                      meta['totalRecords'] ?? meta['total-count'] ?? null;
-          if (raw !== null && raw !== undefined) total = Number(raw);
-        }
-        // Fall back to links.last URL: extract offset + PAGE_SIZE
-        if ((!total || isNaN(total)) && links) {
-          const lastHref = typeof links['last'] === 'string' ? links['last']
-                         : (links['last'] as Record<string, unknown>)?.['href'] as string | undefined;
-          if (lastHref) {
-            const m = lastHref.match(/page(?:%5B|\[)offset(?:%5D|\])=(\d+)/i);
-            if (m) total = parseInt(m[1], 10) + PAGE_SIZE;
-          }
-        }
-
-        console.log('[fw API] total:', total, '| meta:', JSON.stringify(meta)?.substring(0, 300));
-
-        const allItems: unknown[] = [...firstData];
-
-        if (total && !isNaN(total) && total > PAGE_SIZE) {
-          // Known total — build all offsets upfront
-          const toFetch = Math.min(total, MAX_ITEMS);
-          const offsets: number[] = [];
-          for (let o = PAGE_SIZE; o < toFetch; o += PAGE_SIZE) offsets.push(o);
-          for (let i = 0; i < offsets.length; i += BATCH) {
-            const chunk = await fetchBatch(offsets.slice(i, i + BATCH));
-            allItems.push(...chunk);
-          }
-        } else {
-          // Unknown total — probe pages until we get an empty one
-          let offset = PAGE_SIZE;
-          while (allItems.length < MAX_ITEMS) {
-            const batchOffsets: number[] = [];
-            for (let j = 0; j < BATCH && offset + j * PAGE_SIZE < MAX_ITEMS; j++) {
-              batchOffsets.push(offset + j * PAGE_SIZE);
-            }
-            if (batchOffsets.length === 0) break;
-            const chunk = await fetchBatch(batchOffsets);
-            if (chunk.length === 0) break;
-            allItems.push(...chunk);
-            offset += batchOffsets.length * PAGE_SIZE;
-          }
-        }
-
-        console.log('[fw API] fetched:', allItems.length);
-        return allItems;
-      } catch (e) { console.log('[fw API] error', String(e)); return null; }
-    }, mmv);
-
-    console.log('[CarsCoza] page.evaluate result:', apiItems === null ? 'null' : Array.isArray(apiItems) ? `array(${apiItems.length})` : typeof apiItems);
-
-    if (apiItems && Array.isArray(apiItems) && apiItems.length > 0) {
-      console.log('[CarsCoza] fw API items:', apiItems.length);
-      const listings = extractFromVehicleArray(apiItems as Array<Record<string, unknown>>, 'fwapi');
+    if (allRawVehicles.length > 0) {
+      const listings = extractFromVehicleArray(allRawVehicles, 'ssr-pages');
       if (listings.length > 0) {
-        console.log('[CarsCoza] Listings from fw API:', listings.length);
+        console.log('[CarsCoza] Listings from SSR pages:', listings.length);
         return listings;
       }
     }
 
-    // API failed — fall back to XHR/SSR/link strategies; scroll first to trigger lazy-load
-    await page.waitForLoadState('networkidle').catch(() => null);
-    for (let i = 0; i < 3; i++) {
-      await page.waitForTimeout(1500);
-      await page.evaluate((i) => window.scrollBy(0, window.innerHeight * (i + 1)), i);
-    }
-    await page.waitForTimeout(1500);
-
-    // Strategy 0b: use captured XHR/fetch JSON API responses
-    for (const { url: xhrUrl, json } of capturedJsons) {
-      const arr = findVehicleArray(json);
-      if (arr && arr.length > 0) {
-        console.log('[CarsCoza] Found vehicle array in XHR:', xhrUrl.substring(0, 80), 'size:', arr.length);
-        const listings = extractFromVehicleArray(arr, 'xhrapi');
-        if (listings.length > 0) {
-          console.log('[CarsCoza] Listings from XHR API:', listings.length);
-          return listings;
-        }
-      }
-    }
-
-    // Strategy 1: Extract from SSR data containers (__NEXT_DATA__, __NUXT__, etc.)
-    // Dump the raw JSON from the page and process it server-side with findVehicleArray
-    const ssrJson = await page.evaluate(() => {
-      const sources: Array<{ name: string; text: string }> = [];
-      const nextEl = document.getElementById('__NEXT_DATA__');
-      if (nextEl?.textContent) sources.push({ name: '__NEXT_DATA__', text: nextEl.textContent });
-      // Some sites embed data in script tags with type=application/json
-      document.querySelectorAll('script[type="application/json"]').forEach((el, i) => {
-        if (el.textContent && el.textContent.length > 200) {
-          sources.push({ name: `script[json][${i}]`, text: el.textContent });
-        }
-      });
-      // Nuxt.js uses window.__NUXT__ in a <script> tag
-      const nuxtScript = Array.from(document.querySelectorAll('script:not([src])')).find(s =>
-        s.textContent?.includes('__NUXT__') || s.textContent?.includes('window.__STATE__')
-      );
-      if (nuxtScript?.textContent) sources.push({ name: '__NUXT__', text: nuxtScript.textContent.substring(0, 50000) });
-
-      // Log what we found
-      const topLinkCount = document.querySelectorAll('a[href*="/for-sale/"]').length;
-      const htmlExcerpt = document.documentElement.outerHTML.substring(0, 500);
-      return { sources: sources.map(s => ({ name: s.name, size: s.text.length, text: s.text })), topLinkCount, htmlExcerpt };
-    });
-
-    console.log('[CarsCoza] SSR sources found:', ssrJson.sources.map(s => `${s.name}(${s.size}b)`).join(', '));
-    console.log('[CarsCoza] Links matching /for-sale/ on page:', ssrJson.topLinkCount);
-    console.log('[CarsCoza] HTML excerpt:', ssrJson.htmlExcerpt.substring(0, 200).replace(/\s+/g, ' '));
-
-    for (const { name, text } of ssrJson.sources) {
-      try {
-        let json: unknown;
-        if (name === '__NUXT__') {
-          // __NUXT__ is set as JS assignment — extract the JSON portion
-          const match = text.match(/\{[\s\S]*\}/);
-          if (!match) continue;
-          json = JSON.parse(match[0]);
-        } else {
-          json = JSON.parse(text);
-        }
-        const arr = findVehicleArray(json);
-        if (arr && arr.length > 0) {
-          console.log(`[CarsCoza] Found vehicle array in ${name}: size=${arr.length}, sample keys:`, Object.keys(arr[0]).slice(0, 8).join(','));
-          const listings = extractFromVehicleArray(arr, name);
-          if (listings.length > 0) {
-            console.log(`[CarsCoza] Listings from ${name}:`, listings.length);
-            return listings;
-          }
-        } else {
-          // Log the top-level keys to help diagnose structure
-          try {
-            const parsed = json as Record<string, unknown>;
-            console.log(`[CarsCoza] ${name} top keys:`, Object.keys(parsed).slice(0, 10).join(','));
-          } catch { /* */ }
-        }
-      } catch { /* ignore parse errors */ }
-    }
-
-    // Strategy 2: parse listing links — URL slug contains year/make/model/location
+    // Last resort: parse listing links from the final page in the browser tab
     const rawLinks = await page.evaluate(() => {
       const links = Array.from(document.querySelectorAll('a[href*="/for-sale/used/"]')) as HTMLAnchorElement[];
       const seen = new Set<string>();
