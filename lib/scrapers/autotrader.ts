@@ -1,21 +1,16 @@
 /**
  * AutoTrader SA scraper
+ *
+ * NOTE: autotrader.co.za blocks data-center IPs (Render/Vercel/AWS) with HTTP 503.
+ * This scraper is kept for local/residential-IP use. On blocked environments it
+ * returns [] immediately without wasting time.
  */
 
 import type { Browser } from 'playwright-core';
 import type { Listing } from '@/lib/types';
-import { normalizeRaw, parsePrice, parseMileage, parseYear } from './normalize';
+import { parsePrice, parseMileage, parseYear } from './normalize';
 
 const BASE_URL = 'https://www.autotrader.co.za/cars-for-sale';
-
-interface PageExtract {
-  title: string;
-  priceText: string;
-  mileageText: string;
-  locationText: string;
-  url: string;
-  hasServiceHistory: boolean;
-}
 
 export async function scrapeAutoTrader(
   browser: Browser,
@@ -24,19 +19,13 @@ export async function scrapeAutoTrader(
 ): Promise<Listing[]> {
   const page = await browser.newPage();
   try {
-    // Full realistic browser context to avoid bot detection
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.setExtraHTTPHeaders({
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
       'Accept-Language': 'en-ZA,en-GB;q=0.9,en;q=0.8',
       'Accept-Encoding': 'gzip, deflate, br',
       'Upgrade-Insecure-Requests': '1',
-      'Sec-Fetch-Dest': 'document',
-      'Sec-Fetch-Mode': 'navigate',
-      'Sec-Fetch-Site': 'none',
-      'Sec-Fetch-User': '?1',
-      'Cache-Control': 'max-age=0',
     });
 
     const params = new URLSearchParams();
@@ -67,29 +56,22 @@ export async function scrapeAutoTrader(
     const status = response?.status() ?? 0;
     console.log('[AutoTrader] HTTP status:', status);
 
-    // Wait for JavaScript to render content
+    // Data-center IPs are blocked — bail immediately
+    if (status === 503 || status === 403) {
+      console.log('[AutoTrader] Blocked (status', status, ') — skipping');
+      return [];
+    }
+
     await page.waitForLoadState('networkidle').catch(() => null);
-    await page.waitForTimeout(3000);
+    await page.waitForTimeout(2000);
 
     const pageTitle = await page.title();
     console.log('[AutoTrader] Page title:', pageTitle);
-    const bodyText = await page.evaluate(() => document.body?.innerText?.slice(0, 300) ?? '');
-    console.log('[AutoTrader] Body text preview:', bodyText);
 
-    // Try JSON-LD structured data first
-    const jsonLdListings = await extractFromJsonLd(page, 'autotrader');
-    if (jsonLdListings.length > 0) {
-      console.log('[AutoTrader] JSON-LD listings:', jsonLdListings.length);
-      return jsonLdListings;
-    }
-
-    // DOM-based extraction — find listing links and walk up to their container
-    const raw = await page.evaluate((): PageExtract[] => {
+    const raw = await page.evaluate(() => {
       const adLinks = Array.from(document.querySelectorAll('a[href*="/ad/"], a[href*="/used/"]'));
-      console.log('AutoTrader ad links:', adLinks.length);
-
       const seen = new Set<Element>();
-      const results: PageExtract[] = [];
+      const results: Array<{title:string;priceText:string;mileageText:string;locationText:string;url:string;hasServiceHistory:boolean}> = [];
 
       for (const link of adLinks.slice(0, 30)) {
         let container: Element | null = link.parentElement;
@@ -119,26 +101,17 @@ export async function scrapeAutoTrader(
         if (title && priceText) {
           results.push({
             title: yearMatch ? `${yearMatch[0]} ${title}` : title,
-            priceText,
-            mileageText,
-            locationText: matchedProvince,
-            url: absUrl,
-            hasServiceHistory,
+            priceText, mileageText,
+            locationText: matchedProvince, url: absUrl, hasServiceHistory,
           });
         }
       }
       return results;
     });
 
-    const debug = await page.evaluate(() => ({
-      adLinkCount: document.querySelectorAll('a[href*="/ad/"]').length,
-      usedLinkCount: document.querySelectorAll('a[href*="/used/"]').length,
-      h2Count: document.querySelectorAll('h2').length,
-      bodyLen: document.body?.innerHTML?.length ?? 0,
-    }));
-    console.log('[AutoTrader] Debug:', JSON.stringify(debug));
-    console.log('[AutoTrader] Raw extracts:', raw.length);
+    console.log('[AutoTrader] Listings extracted:', raw.length);
 
+    const { normalizeRaw } = await import('./normalize');
     const listings: Listing[] = [];
     for (const r of raw) {
       const normalized = normalizeRaw(
@@ -147,46 +120,9 @@ export async function scrapeAutoTrader(
       );
       if (normalized) listings.push(normalized);
     }
-    console.log('[AutoTrader] Listings extracted:', listings.length);
     return listings;
   } finally {
     await page.close();
-  }
-}
-
-async function extractFromJsonLd(page: import('playwright-core').Page, source: 'autotrader' | 'carscoza'): Promise<Listing[]> {
-  try {
-    const jsonLdData = await page.evaluate(() => {
-      return Array.from(document.querySelectorAll('script[type="application/ld+json"]'))
-        .map(s => { try { return JSON.parse(s.textContent ?? '{}'); } catch { return null; } })
-        .filter(Boolean);
-    });
-
-    const listings: Listing[] = [];
-    for (const data of jsonLdData) {
-      const items: unknown[] = Array.isArray(data['@graph']) ? data['@graph'] :
-                    Array.isArray(data) ? data :
-                    data['@type'] ? [data] : [];
-      for (const raw of items) {
-        const item = raw as Record<string, unknown>;
-        if (!['Car', 'Vehicle', 'Product'].includes(item['@type'] as string)) continue;
-        const name = item.name as string ?? '';
-        const offerObj = item.offers as Record<string, unknown> | undefined;
-        const price = (offerObj?.price ?? item.price ?? 0) as number;
-        const mileageObj = item.mileageFromOdometer as Record<string, unknown> | undefined;
-        const mileage = (mileageObj?.value ?? 0) as number;
-        const url = (item.url as string) ?? '';
-        if (!name || !price) continue;
-        const normalized = normalizeRaw(
-          { title: name, priceText: `R ${price}`, mileageText: `${mileage} km`, locationText: '', url, serviceHistory: false },
-          source,
-        );
-        if (normalized) listings.push(normalized);
-      }
-    }
-    return listings;
-  } catch {
-    return [];
   }
 }
 

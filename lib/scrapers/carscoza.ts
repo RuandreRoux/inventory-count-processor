@@ -1,22 +1,15 @@
 /**
  * Cars.co.za scraper
+ *
+ * Listings are loaded via an internal JSON API after page render.
+ * We intercept those responses rather than scraping the DOM.
  */
 
-import type { Browser } from 'playwright-core';
+import type { Browser, Response } from 'playwright-core';
 import type { Listing } from '@/lib/types';
 import { normalizeRaw } from './normalize';
 
-// Cars.co.za search URL — uses query params, not path segments
 const SEARCH_URL = 'https://www.cars.co.za/usedcars/';
-
-interface PageExtract {
-  title: string;
-  priceText: string;
-  mileageText: string;
-  locationText: string;
-  url: string;
-  hasServiceHistory: boolean;
-}
 
 function normalizeMake(query: string): { make: string; model: string } {
   const MAKES: Record<string, string> = {
@@ -34,12 +27,89 @@ function normalizeMake(query: string): { make: string; model: string } {
   return { make, model };
 }
 
+// Try to extract an array of vehicle listings from any JSON structure
+function extractVehiclesFromJson(json: unknown): Array<Record<string, unknown>> {
+  if (!json || typeof json !== 'object') return [];
+  const obj = json as Record<string, unknown>;
+
+  // Common API response shapes
+  const candidates = [
+    obj['listings'], obj['results'], obj['data'], obj['vehicles'],
+    obj['adverts'], obj['items'], obj['cars'], obj['hits'],
+    (obj['data'] as Record<string, unknown>)?.['listings'],
+    (obj['data'] as Record<string, unknown>)?.['results'],
+  ];
+  for (const c of candidates) {
+    if (Array.isArray(c) && c.length > 0 && typeof c[0] === 'object') {
+      return c as Array<Record<string, unknown>>;
+    }
+  }
+  if (Array.isArray(json) && json.length > 0 && typeof json[0] === 'object') {
+    return json as Array<Record<string, unknown>>;
+  }
+  return [];
+}
+
+function vehicleToListing(v: Record<string, unknown>): Listing | null {
+  // Extract common fields from various API response shapes
+  const make = (v['make'] ?? v['Make'] ?? v['manufacturer'] ?? '') as string;
+  const model = (v['model'] ?? v['Model'] ?? '') as string;
+  const variant = (v['variant'] ?? v['Variant'] ?? v['trim'] ?? '') as string;
+  const year = Number(v['year'] ?? v['Year'] ?? v['modelYear'] ?? 0);
+  const price = Number(v['price'] ?? v['Price'] ?? v['sellingPrice'] ?? v['asking_price'] ?? 0);
+  const mileage = Number(v['mileage'] ?? v['Mileage'] ?? v['km'] ?? v['odometer'] ?? 0);
+  const url = (v['url'] ?? v['link'] ?? v['listingUrl'] ?? v['permalink'] ?? '') as string;
+
+  const title = `${year} ${make} ${model} ${variant}`.trim();
+
+  if (!make || !price || !year) return null;
+
+  return normalizeRaw(
+    {
+      title,
+      priceText: `R ${price}`,
+      mileageText: `${mileage} km`,
+      locationText: (v['province'] ?? v['region'] ?? v['location'] ?? '') as string,
+      url: url.startsWith('http') ? url : url ? `https://www.cars.co.za${url}` : '',
+      serviceHistory: Boolean(v['serviceHistory'] ?? v['fsh'] ?? v['fullServiceHistory'] ?? false),
+    },
+    'carscoza',
+  );
+}
+
 export async function scrapeCarsCoza(
   browser: Browser,
   query: string,
   filters: { maxPrice?: number; maxMileage?: number; minYear?: number },
 ): Promise<Listing[]> {
   const page = await browser.newPage();
+  const capturedJsonUrls: string[] = [];
+  const capturedVehicles: Array<Record<string, unknown>> = [];
+
+  // Intercept JSON API responses
+  const onResponse = async (response: Response) => {
+    try {
+      const ct = response.headers()['content-type'] ?? '';
+      if (!ct.includes('json')) return;
+      const url = response.url();
+      if (!url.includes('cars.co.za')) return;
+
+      const json = await response.json().catch(() => null);
+      if (!json) return;
+
+      const vehicles = extractVehiclesFromJson(json);
+      if (vehicles.length > 0) {
+        capturedJsonUrls.push(url);
+        capturedVehicles.push(...vehicles);
+        console.log('[CarsCoza] Captured', vehicles.length, 'vehicles from:', url.slice(0, 120));
+      }
+    } catch {
+      // ignore
+    }
+  };
+
+  page.on('response', onResponse);
+
   try {
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.setExtraHTTPHeaders({
@@ -48,10 +118,6 @@ export async function scrapeCarsCoza(
       'Accept-Language': 'en-ZA,en-GB;q=0.9,en;q=0.8',
       'Accept-Encoding': 'gzip, deflate, br',
       'Upgrade-Insecure-Requests': '1',
-      'Sec-Fetch-Dest': 'document',
-      'Sec-Fetch-Mode': 'navigate',
-      'Sec-Fetch-Site': 'none',
-      'Cache-Control': 'max-age=0',
     });
 
     const { make, model } = normalizeMake(query);
@@ -69,145 +135,48 @@ export async function scrapeCarsCoza(
     const status = response?.status() ?? 0;
     console.log('[CarsCoza] HTTP status:', status);
 
-    // If 404, try simpler fallback URL
-    if (status === 404) {
-      const fallbackUrl = `https://www.cars.co.za/used-cars-for-sale/?cat_make=${encodeURIComponent(make)}`;
-      console.log('[CarsCoza] 404, trying fallback:', fallbackUrl);
-      await page.goto(fallbackUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    if (status === 503 || status === 403) {
+      console.log('[CarsCoza] Blocked (status', status, ') — skipping');
+      return [];
     }
 
+    // Wait for the AJAX listing requests to fire and complete
     await page.waitForLoadState('networkidle').catch(() => null);
-    await page.waitForTimeout(3000);
+    await page.waitForTimeout(4000);
 
-    const pageTitle = await page.title();
-    console.log('[CarsCoza] Page title:', pageTitle);
-    const bodyText = await page.evaluate(() => document.body?.innerText?.slice(0, 300) ?? '');
-    console.log('[CarsCoza] Body text preview:', bodyText);
+    // Scroll to trigger lazy loading
+    await page.evaluate(() => window.scrollBy(0, 800));
+    await page.waitForTimeout(2000);
 
-    await page.$('button[id*="accept"], button[class*="accept"], [aria-label*="accept"]')
-      .then((b) => b?.click()).catch(() => null);
+    console.log('[CarsCoza] JSON API URLs captured:', capturedJsonUrls.length);
+    console.log('[CarsCoza] Total vehicles captured:', capturedVehicles.length);
 
-    // Try JSON-LD first
-    const jsonLdListings = await extractFromJsonLd(page, 'carscoza');
-    if (jsonLdListings.length > 0) {
-      console.log('[CarsCoza] JSON-LD listings:', jsonLdListings.length);
-      return jsonLdListings;
-    }
-
-    // DOM-based extraction via anchor URLs
-    const raw = await page.evaluate((): PageExtract[] => {
-      // Cars.co.za listing URLs typically have format /used-car/... or /vehicle/...
-      const selectors = [
-        'a[href*="/used-car/"]',
-        'a[href*="/vehicle/"]',
-        'a[href*="/cars/"]',
-      ];
-      const adLinks = Array.from(new Set(
-        selectors.flatMap(s => Array.from(document.querySelectorAll(s)))
-      )).filter(a => {
-        const href = (a as HTMLAnchorElement).href ?? '';
-        return href.split('/').length >= 5; // exclude short nav links
+    // Log all unique href pattern samples if no API data found
+    if (capturedVehicles.length === 0) {
+      const hrefSamples = await page.evaluate(() => {
+        const links = Array.from(document.querySelectorAll('a[href]'));
+        const hrefs = links.map(a => (a as HTMLAnchorElement).href).filter(h => h.includes('cars.co.za'));
+        const unique = [...new Set(hrefs)].slice(0, 20);
+        return unique;
       });
-
-      console.log('CarsCoza ad links:', adLinks.length);
-
-      const seen = new Set<Element>();
-      const results: PageExtract[] = [];
-
-      for (const link of adLinks.slice(0, 30)) {
-        let container: Element | null = link.parentElement;
-        for (let i = 0; i < 8; i++) {
-          if (!container) break;
-          const text = container.textContent ?? '';
-          if (text.includes('R ') && text.length > 50 && text.length < 3000) break;
-          container = container.parentElement;
-        }
-        if (!container || seen.has(container)) continue;
-        seen.add(container);
-
-        const fullText = container.textContent ?? '';
-        const href = (link as HTMLAnchorElement).href ?? link.getAttribute('href') ?? '';
-        const absUrl = href.startsWith('http') ? href : `https://www.cars.co.za${href}`;
-        const heading = container.querySelector('h1, h2, h3, h4');
-        const title = heading?.textContent?.trim() ?? link.textContent?.trim() ?? '';
-        const priceMatch = fullText.match(/R\s?[\d\s,]+/);
-        const priceText = priceMatch ? priceMatch[0].trim() : '';
-        const kmMatch = fullText.match(/[\d\s,]+\s*km/i);
-        const mileageText = kmMatch ? kmMatch[0].trim() : '';
-        const yearMatch = fullText.match(/\b(19|20)\d{2}\b/);
-        const provinces = ['gauteng', 'western cape', 'kwazulu-natal', 'eastern cape', 'limpopo', 'mpumalanga', 'north west', 'free state', 'northern cape'];
-        const matchedProvince = provinces.find(p => (fullText.toLowerCase()).includes(p)) ?? '';
-        const hasServiceHistory = /\b(full service|fsh|service history)\b/i.test(fullText);
-
-        if (title && priceText) {
-          results.push({
-            title: yearMatch ? `${yearMatch[0]} ${title}` : title,
-            priceText,
-            mileageText,
-            locationText: matchedProvince,
-            url: absUrl,
-            hasServiceHistory,
-          });
-        }
-      }
-      return results;
-    });
-
-    const debug = await page.evaluate(() => ({
-      carLinks: document.querySelectorAll('a[href*="/used-car/"], a[href*="/vehicle/"]').length,
-      h2Count: document.querySelectorAll('h2').length,
-      bodyLen: document.body?.innerHTML?.length ?? 0,
-    }));
-    console.log('[CarsCoza] Debug:', JSON.stringify(debug));
-    console.log('[CarsCoza] Raw extracts:', raw.length);
-
-    const listings: Listing[] = [];
-    for (const r of raw) {
-      const normalized = normalizeRaw(
-        { title: r.title, priceText: r.priceText, mileageText: r.mileageText, locationText: r.locationText, url: r.url, serviceHistory: r.hasServiceHistory },
-        'carscoza',
-      );
-      if (normalized) listings.push(normalized);
+      console.log('[CarsCoza] Sample hrefs on page:', JSON.stringify(hrefSamples));
     }
+
+    // Build Listing objects from captured API data
+    const seen = new Set<string>();
+    const listings: Listing[] = [];
+    for (const v of capturedVehicles.slice(0, 40)) {
+      const listing = vehicleToListing(v);
+      if (listing && !seen.has(listing.id)) {
+        seen.add(listing.id);
+        listings.push(listing);
+      }
+    }
+
     console.log('[CarsCoza] Listings extracted:', listings.length);
     return listings;
   } finally {
+    page.off('response', onResponse);
     await page.close();
-  }
-}
-
-async function extractFromJsonLd(page: import('playwright-core').Page, source: 'autotrader' | 'carscoza'): Promise<Listing[]> {
-  try {
-    const jsonLdData = await page.evaluate(() => {
-      return Array.from(document.querySelectorAll('script[type="application/ld+json"]'))
-        .map(s => { try { return JSON.parse(s.textContent ?? '{}'); } catch { return null; } })
-        .filter(Boolean);
-    });
-
-    const listings: Listing[] = [];
-    for (const data of jsonLdData) {
-      const items: unknown[] = Array.isArray(data['@graph']) ? data['@graph'] :
-                    Array.isArray(data) ? data :
-                    data['@type'] ? [data] : [];
-      for (const raw of items) {
-        const item = raw as Record<string, unknown>;
-        if (!['Car', 'Vehicle', 'Product'].includes(item['@type'] as string)) continue;
-        const name = item.name as string ?? '';
-        const offerObj = item.offers as Record<string, unknown> | undefined;
-        const price = (offerObj?.price ?? item.price ?? 0) as number;
-        const mileageObj = item.mileageFromOdometer as Record<string, unknown> | undefined;
-        const mileage = (mileageObj?.value ?? 0) as number;
-        const url = (item.url as string) ?? '';
-        if (!name || !price) continue;
-        const normalized = normalizeRaw(
-          { title: name, priceText: `R ${price}`, mileageText: `${mileage} km`, locationText: '', url, serviceHistory: false },
-          source,
-        );
-        if (normalized) listings.push(normalized);
-      }
-    }
-    return listings;
-  } catch {
-    return [];
   }
 }
