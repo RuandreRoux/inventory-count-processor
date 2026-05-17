@@ -54,8 +54,13 @@ function SearchResults() {
     }
   }, []);
 
+  // Debounce filter/weight changes — only fire after 700ms of no changes.
+  // This prevents a scrape on every slider tick or keystroke.
   useEffect(() => {
-    fetchListings(filters, weights);
+    const timer = setTimeout(() => {
+      fetchListings(filters, weights);
+    }, 700);
+    return () => clearTimeout(timer);
   }, [filters, weights, fetchListings]);
 
   const handleFilterChange = (partial: Partial<SearchFilters>) => {

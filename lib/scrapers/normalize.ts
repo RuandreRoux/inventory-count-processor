@@ -33,9 +33,14 @@ export function guessTransmission(text: string): Transmission {
 
 export function guessFuel(text: string): Fuel {
   const t = text.toLowerCase();
-  if (t.includes('electric') || t.includes('ev')) return 'electric';
-  if (t.includes('hybrid')) return 'hybrid';
-  if (t.includes('diesel') || t.includes('tdi') || t.includes('gd-6') || t.includes('tdci')) return 'diesel';
+  if (t.includes('electric') || t.includes(' ev ') || /\bev\b/.test(t)) return 'electric';
+  if (t.includes('hybrid') || t.includes('phev')) return 'hybrid';
+  // SA diesel markers: "diesel", TDI/TDCi/CDi/BlueTEC, GD-6, and the common "X.XD" engine suffix
+  if (
+    t.includes('diesel') || t.includes('tdi') || t.includes('tdci') ||
+    t.includes('cdi') || t.includes('bluetec') || t.includes('gd-6') ||
+    t.includes('crdi') || /\d+(\.\d+)?d\b/.test(t)   // e.g. 3.0d, 2.8d, 2.0d
+  ) return 'diesel';
   return 'petrol';
 }
 
