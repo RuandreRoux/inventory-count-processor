@@ -39,6 +39,13 @@ function SearchResults() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [dataSource, setDataSource] = useState<"live" | "disabled" | null>(null);
 
+  // Keep filters.query in sync with the URL — the Navbar pushes a new ?q= without
+  // going through setFilters, so state would otherwise stay on the old query.
+  useEffect(() => {
+    const urlQ = searchParams.get("q") ?? "";
+    setFilters(prev => urlQ !== prev.query ? { ...prev, query: urlQ } : prev);
+  }, [searchParams]);
+
   const fetchListings = useCallback(async (f: SearchFilters, w: RankingWeights) => {
     setLoading(true);
     try {
