@@ -281,14 +281,28 @@ export async function scrapeCarsCoza(
   };
   page.on('response', onResponse);
 
+  // Capture auth headers from Cars.co.za's own /fw/public/v3/vehicle requests.
+  // The page fires facets calls on load; those carry whatever auth the API needs.
+  let capturedAuthHeaders: Record<string, string> = {};
+  page.on('request', req => {
+    if (req.url().includes('/fw/public/v3/vehicle') && Object.keys(capturedAuthHeaders).length === 0) {
+      const h = req.headers();
+      // Keep only custom / auth headers — skip browser-managed forbidden headers
+      capturedAuthHeaders = Object.fromEntries(
+        Object.entries(h).filter(([k]) =>
+          k.startsWith('x-') || k === 'authorization' || k === 'accept'
+        )
+      );
+      console.log('[CarsCoza] Captured auth header keys:', Object.keys(capturedAuthHeaders).join(',') || 'none');
+    }
+  });
+
   try {
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.setExtraHTTPHeaders(BROWSER_HEADERS);
 
     const { make, model } = normalizeMake(query);
 
-    // Cars.co.za search URL — confirmed working format from site
-    // make_model_variant=Toyota[Fortuner] or just Toyota for make-only
     const mmv = model ? `${make}[${model}]` : make;
     const searchUrl = `${SEARCH_URL}?make_model_variant=${encodeURIComponent(mmv)}&sort=sort_rank&price_type=listing_price&P=1`;
     console.log('[CarsCoza] Navigating to:', searchUrl);
@@ -302,55 +316,83 @@ export async function scrapeCarsCoza(
       return [];
     }
 
-    // Wait just enough for the browser session/cookies to be ready — skip heavy scroll delays
-    // when the API strategy works (saves ~8s; fallback strategies will scroll if needed)
-    await page.waitForTimeout(2000);
+    // Wait for Cars.co.za JS to fire its facets API calls (gives us the auth headers)
+    await page.waitForTimeout(3000);
+    console.log('[CarsCoza] Auth headers captured:', Object.keys(capturedAuthHeaders).join(',') || 'none');
 
-    console.log('[CarsCoza] Page title:', await page.title());
+    // Strategy A: use the captured auth headers to call the /fw/public/v3/vehicle API directly.
+    // This is the only reliable multi-page approach — SSR only renders page 1.
+    const apiItems = await page.evaluate(async ({ mmv, extraHeaders }: { mmv: string; extraHeaders: Record<string, string> }) => {
+      const PAGE_SIZE = 20;
+      const MAX_ITEMS = 300;
+      const base = `/fw/public/v3/vehicle?make_model_variant=${encodeURIComponent(mmv)}&sort=sort_rank&price_type=listing_price&page[limit]=${PAGE_SIZE}`;
+      const headers: Record<string, string> = { 'Accept': 'application/vnd.api+json, application/json', ...extraHeaders };
 
-    // Cars.co.za serves listings via SSR (__NEXT_DATA__), not via a client-side API.
-    // The /fw/public/v3/vehicle API requires auth headers we don't have.
-    // Solution: navigate P=1, P=2, P=3 … and extract 20 items per page from __NEXT_DATA__.
+      const fetchPage = (offset: number) =>
+        fetch(`${base}&page[offset]=${offset}`, { credentials: 'include', headers })
+          .then(r => { console.log('[fw API] offset=' + offset + ' status=' + r.status); return r.ok ? r.json() as Promise<Record<string, unknown>> : null; })
+          .catch(e => { console.log('[fw API] fetch error:', String(e)); return null; });
 
-    const extractNextData = async (): Promise<Array<Record<string, unknown>>> => {
-      const text = await page.evaluate(() => {
-        const el = document.getElementById('__NEXT_DATA__');
-        return el?.textContent ?? null;
-      }).catch(() => null);
-      if (!text) return [];
-      try { return findVehicleArray(JSON.parse(text)) ?? []; } catch { return []; }
-    };
-
-    const allRawVehicles: Array<Record<string, unknown>> = [];
-    const navStart = Date.now();
-    const TIME_LIMIT_MS = 42_000; // leave buffer before 60 s maxDuration
-    const MAX_PAGES = 15;
-
-    const page1Items = await extractNextData();
-    allRawVehicles.push(...page1Items);
-    console.log('[CarsCoza] SSR p1:', page1Items.length, 'items');
-
-    for (let p = 2; p <= MAX_PAGES; p++) {
-      if (Date.now() - navStart > TIME_LIMIT_MS) { console.log('[CarsCoza] Time limit at p', p); break; }
       try {
-        const url = `${SEARCH_URL}?make_model_variant=${encodeURIComponent(mmv)}&sort=sort_rank&price_type=listing_price&P=${p}`;
-        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 10_000 });
-        const items = await extractNextData();
-        if (items.length === 0) { console.log('[CarsCoza] p', p, 'empty — done'); break; }
-        allRawVehicles.push(...items);
-        console.log('[CarsCoza] SSR p' + p + ':', items.length, 'items, total:', allRawVehicles.length);
-      } catch (e) {
-        console.log('[CarsCoza] p', p, 'error:', String(e).substring(0, 80));
-        break;
+        const first = await fetchPage(0);
+        if (!first) { console.log('[fw API] first page null'); return null; }
+        const firstData = (first['data'] as unknown[]) ?? [];
+        if (!firstData.length) { console.log('[fw API] first page empty data'); return null; }
+
+        const allItems: unknown[] = [...firstData];
+        let offset = PAGE_SIZE;
+        let emptyBatches = 0;
+
+        while (allItems.length < MAX_ITEMS && emptyBatches < 2) {
+          const batchOffsets: number[] = [];
+          for (let j = 0; j < 10; j++) {
+            if (allItems.length + (batchOffsets.length + 1) * PAGE_SIZE > MAX_ITEMS) break;
+            batchOffsets.push(offset + j * PAGE_SIZE);
+          }
+          if (!batchOffsets.length) break;
+
+          const results = await Promise.all(batchOffsets.map(async o => {
+            const p = await fetchPage(o);
+            return p ? ((p['data'] as unknown[]) ?? []) : [];
+          }));
+
+          let gotAny = false;
+          for (const chunk of results) { if (chunk.length) { allItems.push(...chunk); gotAny = true; } }
+          if (!gotAny) emptyBatches++; else emptyBatches = 0;
+          offset += batchOffsets.length * PAGE_SIZE;
+        }
+
+        console.log('[fw API] fetched total:', allItems.length);
+        return allItems;
+      } catch (e) { console.log('[fw API] error:', String(e)); return null; }
+    }, { mmv, extraHeaders: capturedAuthHeaders });
+
+    if (apiItems && Array.isArray(apiItems) && apiItems.length > 0) {
+      const listings = extractFromVehicleArray(apiItems as Array<Record<string, unknown>>, 'api');
+      if (listings.length > 0) {
+        console.log('[CarsCoza] Listings from API:', listings.length);
+        return listings;
       }
     }
 
-    if (allRawVehicles.length > 0) {
-      const listings = extractFromVehicleArray(allRawVehicles, 'ssr-pages');
-      if (listings.length > 0) {
-        console.log('[CarsCoza] Listings from SSR pages:', listings.length);
-        return listings;
-      }
+    // Strategy B: SSR only gives page 1 (20 items) — use as fallback when API is blocked
+    console.log('[CarsCoza] API returned nothing, falling back to SSR page 1');
+    const ssrText = await page.evaluate(() => {
+      const el = document.getElementById('__NEXT_DATA__');
+      return el?.textContent ?? null;
+    }).catch(() => null);
+
+    if (ssrText) {
+      try {
+        const arr = findVehicleArray(JSON.parse(ssrText));
+        if (arr?.length) {
+          const listings = extractFromVehicleArray(arr, 'ssr-p1');
+          if (listings.length > 0) {
+            console.log('[CarsCoza] Listings from SSR p1:', listings.length);
+            return listings;
+          }
+        }
+      } catch { /* fall through */ }
     }
 
     // Last resort: parse listing links from the final page in the browser tab
