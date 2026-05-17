@@ -1,80 +1,83 @@
 /**
  * Cars.co.za scraper
  *
- * Listings are loaded via an internal JSON API after page render.
- * We intercept those responses rather than scraping the DOM.
+ * Listing URLs follow the pattern:
+ *   /for-sale/used/{year}-{make}-{model}-{variant}-{city}/{id}/
+ * The slug contains year/make/model/variant/location — parsed directly from href.
+ * Price and mileage are extracted from the card container text.
  */
 
 import type { Browser, Response } from 'playwright-core';
 import type { Listing } from '@/lib/types';
-import { normalizeRaw } from './normalize';
+import { BROWSER_HEADERS } from './browser';
+import { normalizeRaw, parsePrice, parseMileage } from './normalize';
 
 const SEARCH_URL = 'https://www.cars.co.za/usedcars/';
 
+const MAKES: Record<string, string> = {
+  toyota: 'Toyota', volkswagen: 'Volkswagen', vw: 'Volkswagen', ford: 'Ford',
+  bmw: 'BMW', 'mercedes-benz': 'Mercedes-Benz', mercedes: 'Mercedes-Benz',
+  hyundai: 'Hyundai', kia: 'Kia', mazda: 'Mazda', isuzu: 'Isuzu',
+  nissan: 'Nissan', honda: 'Honda', suzuki: 'Suzuki', renault: 'Renault',
+  audi: 'Audi', haval: 'Haval', 'land rover': 'Land Rover',
+};
+
 function normalizeMake(query: string): { make: string; model: string } {
-  const MAKES: Record<string, string> = {
-    toyota: 'Toyota', volkswagen: 'Volkswagen', vw: 'Volkswagen', ford: 'Ford',
-    bmw: 'BMW', 'mercedes-benz': 'Mercedes-Benz', mercedes: 'Mercedes-Benz',
-    hyundai: 'Hyundai', kia: 'Kia', mazda: 'Mazda', isuzu: 'Isuzu',
-    nissan: 'Nissan', honda: 'Honda', suzuki: 'Suzuki', renault: 'Renault',
-    audi: 'Audi', haval: 'Haval', 'land rover': 'Land Rover',
-  };
   const q = query.toLowerCase();
   const entry = Object.entries(MAKES).find(([k]) => q.includes(k));
   if (!entry) return { make: query, model: '' };
-  const make = entry[1];
   const model = q.replace(entry[0], '').trim().replace(/\b\w/g, c => c.toUpperCase());
-  return { make, model };
+  return { make: entry[1], model };
 }
 
-// Try to extract an array of vehicle listings from any JSON structure
-function extractVehiclesFromJson(json: unknown): Array<Record<string, unknown>> {
-  if (!json || typeof json !== 'object') return [];
-  const obj = json as Record<string, unknown>;
+/** Parse the Cars.co.za URL slug into structured fields.
+ *  e.g. "2021-Toyota-Hilux-2.8-GD-6-Raised-Body-Legend-4x4-Auto-Double-Cab-Gauteng-Pretoria"
+ */
+function parseSlug(slug: string): { year: number; make: string; model: string; variant: string; city: string; province: string } {
+  const SA_PROVINCES: Record<string, string> = {
+    gauteng: 'Gauteng',
+    'western-cape': 'Western Cape',
+    'kwazulu-natal': 'KwaZulu-Natal',
+    'eastern-cape': 'Eastern Cape',
+    limpopo: 'Limpopo',
+    mpumalanga: 'Mpumalanga',
+    'north-west': 'North West',
+    'north-west-province': 'North West',
+    'free-state': 'Free State',
+    'northern-cape': 'Northern Cape',
+  };
 
-  // Common API response shapes
-  const candidates = [
-    obj['listings'], obj['results'], obj['data'], obj['vehicles'],
-    obj['adverts'], obj['items'], obj['cars'], obj['hits'],
-    (obj['data'] as Record<string, unknown>)?.['listings'],
-    (obj['data'] as Record<string, unknown>)?.['results'],
-  ];
-  for (const c of candidates) {
-    if (Array.isArray(c) && c.length > 0 && typeof c[0] === 'object') {
-      return c as Array<Record<string, unknown>>;
+  const parts = slug.split('-');
+  const yearIdx = parts.findIndex(p => /^(19|20)\d{2}$/.test(p));
+  const year = yearIdx >= 0 ? parseInt(parts[yearIdx], 10) : 0;
+
+  const afterYear = parts.slice(yearIdx + 1);
+
+  // Detect province by matching from the end backwards
+  let provinceKey = '';
+  let provinceEndIdx = afterYear.length;
+  for (let len = 3; len >= 1; len--) {
+    for (let i = afterYear.length - len; i >= 0; i--) {
+      const candidate = afterYear.slice(i, i + len).join('-').toLowerCase();
+      if (SA_PROVINCES[candidate]) {
+        provinceKey = candidate;
+        provinceEndIdx = i;
+        break;
+      }
     }
+    if (provinceKey) break;
   }
-  if (Array.isArray(json) && json.length > 0 && typeof json[0] === 'object') {
-    return json as Array<Record<string, unknown>>;
-  }
-  return [];
-}
 
-function vehicleToListing(v: Record<string, unknown>): Listing | null {
-  // Extract common fields from various API response shapes
-  const make = (v['make'] ?? v['Make'] ?? v['manufacturer'] ?? '') as string;
-  const model = (v['model'] ?? v['Model'] ?? '') as string;
-  const variant = (v['variant'] ?? v['Variant'] ?? v['trim'] ?? '') as string;
-  const year = Number(v['year'] ?? v['Year'] ?? v['modelYear'] ?? 0);
-  const price = Number(v['price'] ?? v['Price'] ?? v['sellingPrice'] ?? v['asking_price'] ?? 0);
-  const mileage = Number(v['mileage'] ?? v['Mileage'] ?? v['km'] ?? v['odometer'] ?? 0);
-  const url = (v['url'] ?? v['link'] ?? v['listingUrl'] ?? v['permalink'] ?? '') as string;
+  const province = SA_PROVINCES[provinceKey] ?? '';
+  const city = afterYear.slice(provinceEndIdx + (provinceKey.split('-').length)).join(' ');
 
-  const title = `${year} ${make} ${model} ${variant}`.trim();
+  // First word = make, second = model, rest = variant (up to province)
+  const carParts = afterYear.slice(0, provinceEndIdx);
+  const make = carParts[0] ?? '';
+  const model = carParts[1] ?? '';
+  const variant = carParts.slice(2).join(' ');
 
-  if (!make || !price || !year) return null;
-
-  return normalizeRaw(
-    {
-      title,
-      priceText: `R ${price}`,
-      mileageText: `${mileage} km`,
-      locationText: (v['province'] ?? v['region'] ?? v['location'] ?? '') as string,
-      url: url.startsWith('http') ? url : url ? `https://www.cars.co.za${url}` : '',
-      serviceHistory: Boolean(v['serviceHistory'] ?? v['fsh'] ?? v['fullServiceHistory'] ?? false),
-    },
-    'carscoza',
-  );
+  return { year, make, model, variant, city, province };
 }
 
 export async function scrapeCarsCoza(
@@ -83,46 +86,38 @@ export async function scrapeCarsCoza(
   filters: { maxPrice?: number; maxMileage?: number; minYear?: number },
 ): Promise<Listing[]> {
   const page = await browser.newPage();
-  const capturedJsonUrls: string[] = [];
-  const capturedVehicles: Array<Record<string, unknown>> = [];
 
-  // Intercept JSON API responses
+  // Also try intercepting JSON API in case it fires
+  const capturedVehicles: Array<Record<string, unknown>> = [];
   const onResponse = async (response: Response) => {
     try {
       const ct = response.headers()['content-type'] ?? '';
-      if (!ct.includes('json')) return;
-      const url = response.url();
-      if (!url.includes('cars.co.za')) return;
-
+      if (!ct.includes('json') || !response.url().includes('cars.co.za')) return;
       const json = await response.json().catch(() => null);
       if (!json) return;
-
-      const vehicles = extractVehiclesFromJson(json);
-      if (vehicles.length > 0) {
-        capturedJsonUrls.push(url);
-        capturedVehicles.push(...vehicles);
-        console.log('[CarsCoza] Captured', vehicles.length, 'vehicles from:', url.slice(0, 120));
+      const candidates = [
+        (json as Record<string,unknown>)['listings'],
+        (json as Record<string,unknown>)['results'],
+        (json as Record<string,unknown>)['data'],
+        Array.isArray(json) ? json : null,
+      ];
+      for (const c of candidates) {
+        if (Array.isArray(c) && c.length > 0 && typeof c[0] === 'object') {
+          capturedVehicles.push(...(c as Array<Record<string,unknown>>));
+          console.log('[CarsCoza] JSON API captured', c.length, 'items');
+          break;
+        }
       }
-    } catch {
-      // ignore
-    }
+    } catch { /* ignore */ }
   };
-
   page.on('response', onResponse);
 
   try {
     await page.setViewportSize({ width: 1280, height: 900 });
-    await page.setExtraHTTPHeaders({
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-      'Accept-Language': 'en-ZA,en-GB;q=0.9,en;q=0.8',
-      'Accept-Encoding': 'gzip, deflate, br',
-      'Upgrade-Insecure-Requests': '1',
-    });
+    await page.setExtraHTTPHeaders(BROWSER_HEADERS);
 
     const { make, model } = normalizeMake(query);
-    const params = new URLSearchParams();
-    params.set('cat_make', make);
+    const params = new URLSearchParams({ cat_make: make });
     if (model) params.set('cat_model', model);
     if (filters.maxPrice) params.set('price_to', String(filters.maxPrice));
     if (filters.maxMileage) params.set('mileage_to', String(filters.maxMileage));
@@ -136,40 +131,112 @@ export async function scrapeCarsCoza(
     console.log('[CarsCoza] HTTP status:', status);
 
     if (status === 503 || status === 403) {
-      console.log('[CarsCoza] Blocked (status', status, ') — skipping');
+      console.log('[CarsCoza] Blocked — skipping');
       return [];
     }
 
-    // Wait for the AJAX listing requests to fire and complete
     await page.waitForLoadState('networkidle').catch(() => null);
-    await page.waitForTimeout(4000);
-
-    // Scroll to trigger lazy loading
+    await page.waitForTimeout(3000);
     await page.evaluate(() => window.scrollBy(0, 800));
     await page.waitForTimeout(2000);
 
-    console.log('[CarsCoza] JSON API URLs captured:', capturedJsonUrls.length);
-    console.log('[CarsCoza] Total vehicles captured:', capturedVehicles.length);
+    console.log('[CarsCoza] Page title:', await page.title());
 
-    // Log all unique href pattern samples if no API data found
-    if (capturedVehicles.length === 0) {
-      const hrefSamples = await page.evaluate(() => {
-        const links = Array.from(document.querySelectorAll('a[href]'));
-        const hrefs = links.map(a => (a as HTMLAnchorElement).href).filter(h => h.includes('cars.co.za'));
-        const unique = [...new Set(hrefs)].slice(0, 20);
-        return unique;
-      });
-      console.log('[CarsCoza] Sample hrefs on page:', JSON.stringify(hrefSamples));
+    // Primary: parse listing links — URL slug has all the car info we need
+    const rawLinks = await page.evaluate(() => {
+      const links = Array.from(document.querySelectorAll('a[href*="/for-sale/used/"]')) as HTMLAnchorElement[];
+      // De-dupe by href
+      const seen = new Set<string>();
+      return links
+        .filter(a => {
+          if (seen.has(a.href)) return false;
+          seen.add(a.href);
+          return true;
+        })
+        .slice(0, 40)
+        .map(a => {
+          // Walk up to find the listing card container for price/mileage
+          let container: Element | null = a.parentElement;
+          for (let i = 0; i < 8; i++) {
+            if (!container) break;
+            const text = container.textContent ?? '';
+            if (text.includes('R ') && text.length > 30 && text.length < 3000) break;
+            container = container.parentElement;
+          }
+          const cardText = container?.textContent ?? '';
+          const priceMatch = cardText.match(/R\s?[\d\s,]+/);
+          const kmMatch = cardText.match(/[\d\s,]+\s*km/i);
+          const hasServiceHistory = /\b(full service|fsh|service history)\b/i.test(cardText);
+
+          return {
+            href: a.href,
+            priceText: priceMatch ? priceMatch[0].trim() : '',
+            mileageText: kmMatch ? kmMatch[0].trim() : '',
+            hasServiceHistory,
+          };
+        });
+    });
+
+    console.log('[CarsCoza] Listing links found:', rawLinks.length);
+
+    const listings: Listing[] = [];
+    const seenIds = new Set<string>();
+
+    for (const r of rawLinks) {
+      // Extract slug from URL: /for-sale/used/{slug}/{id}/
+      const slugMatch = r.href.match(/\/for-sale\/used\/([^/]+)\/(\d+)/);
+      if (!slugMatch) continue;
+
+      const slug = slugMatch[1];
+      const parsed = parseSlug(slug);
+      if (!parsed.year || !parsed.make) continue;
+
+      const title = `${parsed.year} ${parsed.make} ${parsed.model} ${parsed.variant}`.trim();
+      const location = [parsed.city, parsed.province].filter(Boolean).join(', ');
+
+      const listing = normalizeRaw(
+        {
+          title,
+          priceText: r.priceText,
+          mileageText: r.mileageText,
+          locationText: location,
+          url: r.href,
+          serviceHistory: r.hasServiceHistory,
+        },
+        'carscoza',
+      );
+
+      if (listing && !seenIds.has(listing.id)) {
+        // Override parsed fields since slug is more reliable than normalizeRaw's title parsing
+        listing.make = parsed.make;
+        listing.model = parsed.model;
+        listing.variant = parsed.variant;
+        listing.year = parsed.year;
+        if (parsed.city) listing.city = parsed.city;
+        if (parsed.province) listing.province = parsed.province;
+
+        seenIds.add(listing.id);
+        listings.push(listing);
+      }
     }
 
-    // Build Listing objects from captured API data
-    const seen = new Set<string>();
-    const listings: Listing[] = [];
-    for (const v of capturedVehicles.slice(0, 40)) {
-      const listing = vehicleToListing(v);
-      if (listing && !seen.has(listing.id)) {
-        seen.add(listing.id);
-        listings.push(listing);
+    // Supplement with any JSON API data captured
+    if (capturedVehicles.length > 0 && listings.length < 5) {
+      console.log('[CarsCoza] Supplementing with', capturedVehicles.length, 'API vehicles');
+      for (const v of capturedVehicles.slice(0, 20)) {
+        const make = (v['make'] ?? v['Make'] ?? '') as string;
+        const model = (v['model'] ?? v['Model'] ?? '') as string;
+        const year = Number(v['year'] ?? v['Year'] ?? 0);
+        const price = Number(v['price'] ?? v['Price'] ?? 0);
+        const mileage = Number(v['mileage'] ?? v['Mileage'] ?? v['km'] ?? 0);
+        const url = (v['url'] ?? v['link'] ?? '') as string;
+        if (!make || !price) continue;
+        const title = `${year} ${make} ${model}`.trim();
+        const n = normalizeRaw(
+          { title, priceText: `R ${price}`, mileageText: `${mileage} km`, locationText: '', url: url.startsWith('http') ? url : url ? `https://www.cars.co.za${url}` : '', serviceHistory: false },
+          'carscoza',
+        );
+        if (n && !seenIds.has(n.id)) { seenIds.add(n.id); listings.push(n); }
       }
     }
 
@@ -180,3 +247,5 @@ export async function scrapeCarsCoza(
     await page.close();
   }
 }
+
+export { parsePrice, parseMileage };
