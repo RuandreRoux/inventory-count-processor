@@ -104,22 +104,43 @@ function extractFromVehicleArray(raw: Array<Record<string, unknown>>, source: st
     const attrs = rawV['attributes'] as Record<string, unknown> | undefined;
     const v: Record<string, unknown> = attrs && typeof attrs === 'object' ? { ...attrs, ...rawV } : rawV;
 
-    const make = pickStr(v, 'make', 'Make', 'manufacturer', 'makeDescription', 'makeName', 'brand');
-    const model = pickStr(v, 'model', 'Model', 'modelDescription', 'modelName');
-    const variant = pickStr(v, 'variant', 'Variant', 'derivative', 'trim', 'variantDescription', 'description', 'title');
-    const year = pickNum(v, 'year', 'Year', 'modelYear', 'vehicleYear');
-    const price = pickNum(v, 'price', 'Price', 'sellingPrice', 'askingPrice', 'listPrice', 'vehiclePrice', 'retail');
-    const mileage = pickNum(v, 'mileage', 'Mileage', 'km', 'odometer', 'kilometres', 'kilometers', 'kms');
-    const rawUrl = pickStr(v, 'url', 'link', 'listingUrl', 'permalink', 'adUrl', 'href', 'detailUrl', 'slug');
+    // Log first item's keys so we can see exactly what Cars.co.za sends
+    if (rawV === raw[0] && source !== 'link') {
+      const numFields = Object.entries(v).filter(([,val]) => typeof val === 'number').map(([k,val]) => `${k}=${val}`);
+      const strFields = Object.entries(v).filter(([,val]) => typeof val === 'string' && (val as string).length < 80).map(([k,val]) => `${k}="${val}"`);
+      console.log(`[CarsCoza] First item (${source}) num fields: ${numFields.join(', ')}`);
+      console.log(`[CarsCoza] First item (${source}) str fields: ${strFields.slice(0, 20).join(', ')}`);
+    }
+
+    const make = pickStr(v, 'make', 'Make', 'manufacturer', 'makeDescription', 'makeName', 'brand', 'make_description');
+    const model = pickStr(v, 'model', 'Model', 'modelDescription', 'modelName', 'model_description');
+    const variant = pickStr(v, 'variant', 'Variant', 'derivative', 'trim', 'variantDescription', 'description', 'variant_description', 'title');
+    const year = pickNum(v, 'year', 'Year', 'modelYear', 'vehicleYear', 'model_year', 'vehicle_year');
+    const price = pickNum(v, 'price', 'Price', 'sellingPrice', 'askingPrice', 'listPrice', 'vehiclePrice', 'retail', 'selling_price', 'asking_price');
+    const mileage = pickNum(v, 'mileage', 'Mileage', 'km', 'odometer', 'kilometres', 'kilometers', 'kms', 'vehicle_mileage', 'odometer_reading', 'km_reading', 'distance', 'milage', 'mileage_value');
+    const rawUrl = pickStr(v, 'url', 'link', 'listingUrl', 'permalink', 'adUrl', 'href', 'detailUrl', 'slug', 'detail_url', 'listing_url', 'ad_url');
+    // JSON:API links.self contains the URL
+    const linksObj = (rawV['links'] ?? (v['links'])) as Record<string, unknown> | undefined;
+    const linksUrl = linksObj && typeof linksObj === 'object' ? (typeof linksObj['self'] === 'string' ? linksObj['self'] as string : '') : '';
     // JSON:API images may be nested: images[0].url or photos[0].url
-    let imageUrl = pickStr(v, 'image', 'imageUrl', 'thumbnail', 'photo', 'primaryImage', 'mainImage', 'heroImage', 'imgUrl', 'picture');
+    let imageUrl = pickStr(v, 'image', 'imageUrl', 'thumbnail', 'photo', 'primaryImage', 'mainImage', 'heroImage', 'imgUrl', 'picture', 'featured_image_url', 'primary_image_url', 'image_url', 'photo_url', 'img', 'thumbnailUrl');
     if (!imageUrl) {
-      const imgArr = (v['images'] ?? v['photos'] ?? v['media']) as Array<Record<string, unknown>> | undefined;
+      const imgArr = (v['images'] ?? v['photos'] ?? v['media'] ?? v['gallery']) as Array<Record<string, unknown>> | undefined;
       if (Array.isArray(imgArr) && imgArr.length > 0) {
-        imageUrl = pickStr(imgArr[0], 'url', 'src', 'href', 'original', 'large', 'medium', 'small');
+        imageUrl = pickStr(imgArr[0], 'url', 'src', 'href', 'original', 'large', 'medium', 'small', 'thumbnail');
       }
     }
-    const locationText = pickStr(v, 'province', 'region', 'city', 'location', 'area', 'suburb', 'town');
+    const locationText = pickStr(v, 'province', 'region', 'city', 'location', 'area', 'suburb', 'town', 'dealer_province', 'dealer_city');
+
+    // Build URL: prefer links.self > attribute url field > construct from id+make+model+year
+    const listingId = String(rawV['id'] ?? v['id'] ?? '');
+    let finalUrl = linksUrl || rawUrl;
+    if (!finalUrl && listingId && year && make) {
+      // Construct a working Cars.co.za URL from available data
+      const slug = [year, make, model, variant].filter(Boolean).join('-').replace(/\s+/g, '-').replace(/[^a-zA-Z0-9-]/g, '');
+      finalUrl = `/for-sale/used/${slug}/${listingId}/`;
+    }
+
     if (!make || !price || !year) {
       if (source !== 'link') console.log(`[CarsCoza] Skip (${source}): make=${make} price=${price} year=${year} keys=${Object.keys(v).slice(0, 12).join(',')}`);
       continue;
@@ -131,8 +152,8 @@ function extractFromVehicleArray(raw: Array<Record<string, unknown>>, source: st
         priceText: `R ${price}`,
         mileageText: `${mileage} km`,
         locationText,
-        url: rawUrl.startsWith('http') ? rawUrl : rawUrl ? `https://www.cars.co.za${rawUrl}` : '',
-        serviceHistory: Boolean(v['serviceHistory'] ?? v['fsh'] ?? v['fullServiceHistory'] ?? false),
+        url: finalUrl.startsWith('http') ? finalUrl : finalUrl ? `https://www.cars.co.za${finalUrl}` : '',
+        serviceHistory: Boolean(v['serviceHistory'] ?? v['fsh'] ?? v['fullServiceHistory'] ?? v['full_service_history'] ?? false),
       },
       'carscoza',
     );
