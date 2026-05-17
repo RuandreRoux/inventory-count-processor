@@ -38,8 +38,10 @@ export function guessFuel(text: string): Fuel {
   // SA diesel markers: "diesel", TDI/TDCi/CDi/BlueTEC, GD-6, and the common "X.XD" engine suffix
   if (
     t.includes('diesel') || t.includes('tdi') || t.includes('tdci') ||
-    t.includes('cdi') || t.includes('bluetec') || t.includes('gd-6') ||
-    t.includes('crdi') || /\d+(\.\d+)?d\b/.test(t)   // e.g. 3.0d, 2.8d, 2.0d
+    t.includes('cdi') || t.includes('bluetec') ||
+    t.includes('gd-6') || t.includes('gd 6') || t.includes('gd6') || // Toyota GD-6 diesel
+    t.includes('crdi') || t.includes('dci') || t.includes('d4d') ||
+    /\b\d+(\.\d+)?d\b/.test(t)  // e.g. 3.0d, 2.8d, 2.4d, 2.0d
   ) return 'diesel';
   return 'petrol';
 }
@@ -79,6 +81,7 @@ export function normalizeRaw(raw: RawListing, source: Source): Listing | null {
     transmission: guessTransmission(combined),
     fuel: guessFuel(combined),
     color: 'Unknown', province, city,
+    url: raw.url || undefined,
     listedDate: new Date().toISOString().slice(0, 10),
     description: raw.description ?? raw.title,
   };

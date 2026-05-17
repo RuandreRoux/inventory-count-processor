@@ -1,4 +1,3 @@
-import Link from "next/link";
 import type { Listing } from "@/lib/types";
 import { SOURCE_BAR_COLORS } from "@/lib/types";
 import ScoreBadge from "./ScoreBadge";
@@ -19,7 +18,7 @@ const CAR_COLORS: Record<string, string> = {
   Orange: "#ea580c",
 };
 
-function CarThumbnail({ color, make, model }: { color: string; make: string; model: string }) {
+function CarPlaceholder({ color, make, model }: { color: string; make: string; model: string }) {
   const bg = CAR_COLORS[color] ?? "#52525b";
   return (
     <div className="relative flex h-44 w-full items-center justify-center overflow-hidden bg-zinc-900">
@@ -33,18 +32,10 @@ function CarThumbnail({ color, make, model }: { color: string; make: string; mod
         <path d="M45 48 Q60 20 95 18 L140 18 Q165 20 178 48 Z" fill={bg} />
         <path
           d="M50 48 Q63 24 96 22 L139 22 Q162 24 173 48 Z"
-          fill="none"
-          stroke="rgba(255,255,255,0.12)"
-          strokeWidth="1"
+          fill="none" stroke="rgba(255,255,255,0.12)" strokeWidth="1"
         />
-        <rect
-          x="52" y="24" width="48" height="22" rx="4"
-          fill="rgba(147,210,255,0.18)" stroke="rgba(255,255,255,0.1)" strokeWidth="0.5"
-        />
-        <rect
-          x="105" y="24" width="48" height="22" rx="4"
-          fill="rgba(147,210,255,0.18)" stroke="rgba(255,255,255,0.1)" strokeWidth="0.5"
-        />
+        <rect x="52" y="24" width="48" height="22" rx="4" fill="rgba(147,210,255,0.18)" stroke="rgba(255,255,255,0.1)" strokeWidth="0.5" />
+        <rect x="105" y="24" width="48" height="22" rx="4" fill="rgba(147,210,255,0.18)" stroke="rgba(255,255,255,0.1)" strokeWidth="0.5" />
         <circle cx="55" cy="80" r="14" fill="#18181b" />
         <circle cx="55" cy="80" r="10" fill="#27272a" />
         <circle cx="55" cy="80" r="5" fill="#3f3f46" />
@@ -59,15 +50,43 @@ function CarThumbnail({ color, make, model }: { color: string; make: string; mod
   );
 }
 
+function CarThumbnail({ listing }: { listing: Listing }) {
+  if (listing.imageUrl) {
+    return (
+      <div className="relative h-44 w-full overflow-hidden bg-zinc-900">
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src={listing.imageUrl}
+          alt={`${listing.make} ${listing.model}`}
+          className="h-full w-full object-cover"
+          onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
+        />
+        <div className="absolute bottom-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-white/10 to-transparent" />
+      </div>
+    );
+  }
+  return <CarPlaceholder color={listing.color} make={listing.make} model={listing.model} />;
+}
+
 export default function ListingCard({ listing }: { listing: Listing }) {
   const barClass = SOURCE_BAR_COLORS[listing.source];
 
+  // Link directly to the external listing when a URL is available;
+  // fall back to the internal detail page for mock/offline listings.
+  const href = listing.url || `/vehicle/${listing.id}`;
+  const isExternal = !!listing.url;
+
   return (
-    <Link href={`/vehicle/${listing.id}`} className="group block">
+    <a
+      href={href}
+      target={isExternal ? "_blank" : undefined}
+      rel={isExternal ? "noopener noreferrer" : undefined}
+      className="group block"
+    >
       <div className="relative rounded-xl border border-zinc-800 bg-[#111118] overflow-hidden transition-all duration-200 hover:border-amber-500/40 hover:shadow-[0_0_20px_rgba(245,158,11,0.08)]">
         <div className={`h-0.5 w-full bg-gradient-to-r ${barClass}`} />
         <div className="relative">
-          <CarThumbnail color={listing.color} make={listing.make} model={listing.model} />
+          <CarThumbnail listing={listing} />
           {listing.score !== undefined && (
             <div className="absolute right-3 top-3">
               <ScoreBadge score={listing.score} size="md" />
@@ -113,6 +132,6 @@ export default function ListingCard({ listing }: { listing: Listing }) {
           </div>
         </div>
       </div>
-    </Link>
+    </a>
   );
 }

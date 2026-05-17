@@ -21,6 +21,8 @@ export interface Listing {
   city: string;
   listedDate: string;
   description: string;
+  url?: string;
+  imageUrl?: string;
   score?: number;
   scoreBreakdown?: ScoreBreakdown;
 }

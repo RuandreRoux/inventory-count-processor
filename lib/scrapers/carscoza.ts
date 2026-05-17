@@ -155,7 +155,7 @@ export async function scrapeCarsCoza(
         })
         .slice(0, 40)
         .map(a => {
-          // Walk up to find the listing card container for price/mileage
+          // Walk up to find the listing card container
           let container: Element | null = a.parentElement;
           for (let i = 0; i < 8; i++) {
             if (!container) break;
@@ -163,16 +163,32 @@ export async function scrapeCarsCoza(
             if (text.includes('R ') && text.length > 30 && text.length < 3000) break;
             container = container.parentElement;
           }
+
+          // Use leaf elements for precise extraction — avoids cross-line regex issues
+          const leaves = container
+            ? Array.from(container.querySelectorAll('*')).filter(
+                (el): el is HTMLElement => el.children.length === 0 && !!(el as HTMLElement).innerText?.trim()
+              )
+            : [];
+
+          const priceEl = leaves.find(el => /R\s?\d/.test(el.innerText));
+          const kmEl = leaves.find(el => /\b\d[\d ,]*\s*km\b/i.test(el.innerText));
+          const imgEl = container?.querySelector('img[src*="cars.co.za"], img[src*="imgix"], img[data-src], img[src]') as HTMLImageElement | null;
+
           const cardText = container?.textContent ?? '';
-          const priceMatch = cardText.match(/R\s?[\d\s,]+/);
-          const kmMatch = cardText.match(/[\d\s,]+\s*km/i);
           const hasServiceHistory = /\b(full service|fsh|service history)\b/i.test(cardText);
+
+          // Fallback regex restricted to standard number formats (no cross-line matching)
+          const priceText = priceEl?.innerText?.trim() ?? cardText.match(/R\s?[\d,]+/)?.[0] ?? '';
+          const mileageText = kmEl?.innerText?.trim() ??
+            cardText.match(/\b(\d{1,3}(?:[, ]\d{3})?)\s*km\b/i)?.[0] ?? '';
 
           return {
             href: a.href,
-            priceText: priceMatch ? priceMatch[0].trim() : '',
-            mileageText: kmMatch ? kmMatch[0].trim() : '',
+            priceText,
+            mileageText,
             hasServiceHistory,
+            imageUrl: imgEl?.src ?? imgEl?.dataset?.src ?? '',
           };
         });
     });
@@ -214,6 +230,7 @@ export async function scrapeCarsCoza(
         listing.year = parsed.year;
         if (parsed.city) listing.city = parsed.city;
         if (parsed.province) listing.province = parsed.province;
+        if (r.imageUrl) listing.imageUrl = r.imageUrl;
 
         seenIds.add(listing.id);
         listings.push(listing);
