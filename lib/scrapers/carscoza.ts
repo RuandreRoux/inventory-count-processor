@@ -142,20 +142,84 @@ export async function scrapeCarsCoza(
 
     console.log('[CarsCoza] Page title:', await page.title());
 
-    // Primary: parse listing links — URL slug has all the car info we need
+    // Strategy 1: Extract listing data from window.__NEXT_DATA__ (Next.js SSR payload)
+    // Cars.co.za is a Next.js app — search results are embedded as JSON before JS hydration
+    const nextData = await page.evaluate(() => {
+      try {
+        const el = document.getElementById('__NEXT_DATA__');
+        if (!el) return null;
+        const json = JSON.parse(el.textContent ?? '{}');
+        // Walk the props tree to find an array that looks like vehicle listings
+        function findListings(obj: unknown, depth = 0): unknown[] | null {
+          if (depth > 8 || !obj || typeof obj !== 'object') return null;
+          if (Array.isArray(obj)) {
+            if (obj.length > 0 && typeof obj[0] === 'object' && obj[0] !== null) {
+              const first = obj[0] as Record<string, unknown>;
+              // Vehicle listings have make + price or id + price
+              if ((first['make'] || first['Make'] || first['manufacturer']) && (first['price'] || first['Price'])) return obj;
+              if (first['id'] && (first['price'] || first['Price']) && (first['make'] || first['title'])) return obj;
+            }
+            return null;
+          }
+          for (const v of Object.values(obj as Record<string, unknown>)) {
+            const found = findListings(v, depth + 1);
+            if (found) return found;
+          }
+          return null;
+        }
+        const listings = findListings(json);
+        if (listings) console.log('Found', listings.length, 'listings in __NEXT_DATA__');
+        return listings;
+      } catch { return null; }
+    });
+
+    if (nextData && nextData.length > 0) {
+      console.log('[CarsCoza] __NEXT_DATA__ listings:', nextData.length);
+      const listings: Listing[] = [];
+      const seenIds = new Set<string>();
+      for (const v of (nextData as Array<Record<string, unknown>>).slice(0, 50)) {
+        const make = (v['make'] ?? v['Make'] ?? v['manufacturer'] ?? '') as string;
+        const model = (v['model'] ?? v['Model'] ?? '') as string;
+        const variant = (v['variant'] ?? v['Variant'] ?? v['derivative'] ?? v['trim'] ?? '') as string;
+        const year = Number(v['year'] ?? v['Year'] ?? v['modelYear'] ?? 0);
+        const price = Number(v['price'] ?? v['Price'] ?? v['sellingPrice'] ?? 0);
+        const mileage = Number(v['mileage'] ?? v['Mileage'] ?? v['km'] ?? v['odometer'] ?? 0);
+        const rawUrl = (v['url'] ?? v['link'] ?? v['listingUrl'] ?? v['permalink'] ?? '') as string;
+        const imageUrl = (v['image'] ?? v['imageUrl'] ?? v['thumbnail'] ?? v['photo'] ?? v['primaryImage'] ?? '') as string;
+        if (!make || !price || !year) continue;
+        const title = `${year} ${make} ${model} ${variant}`.trim();
+        const listing = normalizeRaw(
+          {
+            title,
+            priceText: `R ${price}`,
+            mileageText: `${mileage} km`,
+            locationText: (v['province'] ?? v['region'] ?? v['city'] ?? '') as string,
+            url: rawUrl.startsWith('http') ? rawUrl : rawUrl ? `https://www.cars.co.za${rawUrl}` : '',
+            serviceHistory: Boolean(v['serviceHistory'] ?? v['fsh'] ?? false),
+          },
+          'carscoza',
+        );
+        if (listing && !seenIds.has(listing.id)) {
+          listing.make = make; listing.model = model; listing.variant = variant; listing.year = year;
+          if (imageUrl) listing.imageUrl = imageUrl.startsWith('http') ? imageUrl : `https://www.cars.co.za${imageUrl}`;
+          seenIds.add(listing.id);
+          listings.push(listing);
+        }
+      }
+      if (listings.length > 0) {
+        console.log('[CarsCoza] Listings from __NEXT_DATA__:', listings.length);
+        return listings;
+      }
+    }
+
+    // Strategy 2: parse listing links — URL slug contains year/make/model/location
     const rawLinks = await page.evaluate(() => {
       const links = Array.from(document.querySelectorAll('a[href*="/for-sale/used/"]')) as HTMLAnchorElement[];
-      // De-dupe by href
       const seen = new Set<string>();
       return links
-        .filter(a => {
-          if (seen.has(a.href)) return false;
-          seen.add(a.href);
-          return true;
-        })
+        .filter(a => { if (seen.has(a.href)) return false; seen.add(a.href); return true; })
         .slice(0, 40)
         .map(a => {
-          // Walk up to find the listing card container
           let container: Element | null = a.parentElement;
           for (let i = 0; i < 8; i++) {
             if (!container) break;
@@ -163,32 +227,27 @@ export async function scrapeCarsCoza(
             if (text.includes('R ') && text.length > 30 && text.length < 3000) break;
             container = container.parentElement;
           }
-
-          // Use leaf elements for precise extraction — avoids cross-line regex issues
           const leaves = container
             ? Array.from(container.querySelectorAll('*')).filter(
                 (el): el is HTMLElement => el.children.length === 0 && !!(el as HTMLElement).innerText?.trim()
               )
             : [];
-
           const priceEl = leaves.find(el => /R\s?\d/.test(el.innerText));
           const kmEl = leaves.find(el => /\b\d[\d ,]*\s*km\b/i.test(el.innerText));
-          const imgEl = container?.querySelector('img[src*="cars.co.za"], img[src*="imgix"], img[data-src], img[src]') as HTMLImageElement | null;
-
+          // Pick a car photo: prefer CDN/imgix/non-logo images, skip small icons
+          const imgs = Array.from(container?.querySelectorAll('img') ?? []) as HTMLImageElement[];
+          const photoImg = imgs.find(img => {
+            const src = img.src ?? '';
+            return src && !src.includes('logo') && !src.includes('icon') && !src.includes('sprite') &&
+              (img.naturalWidth === 0 || img.naturalWidth > 100); // loaded or large
+          });
           const cardText = container?.textContent ?? '';
-          const hasServiceHistory = /\b(full service|fsh|service history)\b/i.test(cardText);
-
-          // Fallback regex restricted to standard number formats (no cross-line matching)
-          const priceText = priceEl?.innerText?.trim() ?? cardText.match(/R\s?[\d,]+/)?.[0] ?? '';
-          const mileageText = kmEl?.innerText?.trim() ??
-            cardText.match(/\b(\d{1,3}(?:[, ]\d{3})?)\s*km\b/i)?.[0] ?? '';
-
           return {
             href: a.href,
-            priceText,
-            mileageText,
-            hasServiceHistory,
-            imageUrl: imgEl?.src ?? imgEl?.dataset?.src ?? '',
+            priceText: priceEl?.innerText?.trim() ?? cardText.match(/R\s?[\d,]+/)?.[0] ?? '',
+            mileageText: kmEl?.innerText?.trim() ?? cardText.match(/\b(\d{1,3}(?:[, ]\d{3})?)\s*km\b/i)?.[0] ?? '',
+            hasServiceHistory: /\b(full service|fsh|service history)\b/i.test(cardText),
+            imageUrl: photoImg?.src ?? photoImg?.dataset?.src ?? '',
           };
         });
     });
@@ -199,61 +258,22 @@ export async function scrapeCarsCoza(
     const seenIds = new Set<string>();
 
     for (const r of rawLinks) {
-      // Extract slug from URL: /for-sale/used/{slug}/{id}/
       const slugMatch = r.href.match(/\/for-sale\/used\/([^/]+)\/(\d+)/);
       if (!slugMatch) continue;
-
-      const slug = slugMatch[1];
-      const parsed = parseSlug(slug);
+      const parsed = parseSlug(slugMatch[1]);
       if (!parsed.year || !parsed.make) continue;
-
       const title = `${parsed.year} ${parsed.make} ${parsed.model} ${parsed.variant}`.trim();
-      const location = [parsed.city, parsed.province].filter(Boolean).join(', ');
-
       const listing = normalizeRaw(
-        {
-          title,
-          priceText: r.priceText,
-          mileageText: r.mileageText,
-          locationText: location,
-          url: r.href,
-          serviceHistory: r.hasServiceHistory,
-        },
+        { title, priceText: r.priceText, mileageText: r.mileageText, locationText: [parsed.city, parsed.province].filter(Boolean).join(', '), url: r.href, serviceHistory: r.hasServiceHistory },
         'carscoza',
       );
-
       if (listing && !seenIds.has(listing.id)) {
-        // Override parsed fields since slug is more reliable than normalizeRaw's title parsing
-        listing.make = parsed.make;
-        listing.model = parsed.model;
-        listing.variant = parsed.variant;
-        listing.year = parsed.year;
+        listing.make = parsed.make; listing.model = parsed.model; listing.variant = parsed.variant; listing.year = parsed.year;
         if (parsed.city) listing.city = parsed.city;
         if (parsed.province) listing.province = parsed.province;
         if (r.imageUrl) listing.imageUrl = r.imageUrl;
-
         seenIds.add(listing.id);
         listings.push(listing);
-      }
-    }
-
-    // Supplement with any JSON API data captured
-    if (capturedVehicles.length > 0 && listings.length < 5) {
-      console.log('[CarsCoza] Supplementing with', capturedVehicles.length, 'API vehicles');
-      for (const v of capturedVehicles.slice(0, 20)) {
-        const make = (v['make'] ?? v['Make'] ?? '') as string;
-        const model = (v['model'] ?? v['Model'] ?? '') as string;
-        const year = Number(v['year'] ?? v['Year'] ?? 0);
-        const price = Number(v['price'] ?? v['Price'] ?? 0);
-        const mileage = Number(v['mileage'] ?? v['Mileage'] ?? v['km'] ?? 0);
-        const url = (v['url'] ?? v['link'] ?? '') as string;
-        if (!make || !price) continue;
-        const title = `${year} ${make} ${model}`.trim();
-        const n = normalizeRaw(
-          { title, priceText: `R ${price}`, mileageText: `${mileage} km`, locationText: '', url: url.startsWith('http') ? url : url ? `https://www.cars.co.za${url}` : '', serviceHistory: false },
-          'carscoza',
-        );
-        if (n && !seenIds.has(n.id)) { seenIds.add(n.id); listings.push(n); }
       }
     }
 
