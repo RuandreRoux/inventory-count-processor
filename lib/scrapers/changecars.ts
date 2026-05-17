@@ -4,9 +4,9 @@
  * Intercepts internal JSON API calls for listings, falls back to DOM link extraction.
  */
 
-import type { Browser, Response } from 'playwright-core';
+import type { Browser, BrowserContext, Response } from 'playwright-core';
 import type { Listing } from '@/lib/types';
-import { BROWSER_HEADERS } from './browser';
+import { BROWSER_HEADERS, newProxiedContext } from './browser';
 import { normalizeRaw } from './normalize';
 
 const BASE_URL = 'https://www.changecars.co.za';
@@ -82,7 +82,8 @@ export async function scrapeChangeCars(
   query: string,
   filters: { maxPrice?: number; maxMileage?: number; minYear?: number },
 ): Promise<Listing[]> {
-  const page = await browser.newPage();
+  let context: BrowserContext | null = await newProxiedContext(browser);
+  const page = context ? await context.newPage() : await browser.newPage();
   const capturedVehicles: Array<Record<string, unknown>> = [];
   const capturedUrls: string[] = [];
 
@@ -220,6 +221,10 @@ export async function scrapeChangeCars(
     return listings;
   } finally {
     page.off('response', onResponse);
-    await page.close();
+    if (context) {
+      await context.close();
+    } else {
+      await page.close();
+    }
   }
 }
