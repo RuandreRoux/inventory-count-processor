@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { fetchListings, SCRAPING_ENABLED, FIRECRAWL_ENABLED } from '@/lib/scrapers/index';
+import { fetchListings, FIRECRAWL_ENABLED } from '@/lib/scrapers/index';
 import type { SearchFilters, RankingWeights, Condition, Transmission, Fuel } from '@/lib/types';
 import { DEFAULT_WEIGHTS } from '@/lib/types';
 
@@ -14,9 +14,6 @@ function parseWeights(raw: string | null): RankingWeights {
 }
 
 export async function GET(req: NextRequest) {
-  console.log('[DreamCar] SCRAPING_ENABLED env:', process.env.SCRAPING_ENABLED);
-  console.log('[DreamCar] SCRAPING_ENABLED flag:', SCRAPING_ENABLED);
-
   const sp = req.nextUrl.searchParams;
 
   const filters: SearchFilters = {
@@ -37,8 +34,7 @@ export async function GET(req: NextRequest) {
 
   return NextResponse.json(ranked, {
     headers: {
-      'X-Data-Source': (SCRAPING_ENABLED || FIRECRAWL_ENABLED) ? 'live' : 'disabled',
-      'X-Scraping-Env': process.env.SCRAPING_ENABLED ?? 'undefined',
+      'X-Data-Source': FIRECRAWL_ENABLED ? 'live' : 'disabled',
       'Cache-Control': 'no-store',
     },
   });

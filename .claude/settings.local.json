@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(\"/d/Program Files/Git/cmd/git.exe\" --version)",
+      "Bash(find \"/d/Program Files/Git\" -name \"git.exe\" 2>/dev/null)",
+      "Bash(ls \"/d/MyGit/\" 2>/dev/null *)",
+      "WebFetch(domain:inventory-count-processor.onrender.com)",
+      "Bash(git push *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)"
+    ]
+  }
+}

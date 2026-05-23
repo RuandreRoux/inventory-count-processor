@@ -187,9 +187,9 @@ function SearchResults() {
                     d="M9.75 9.75l4.5 4.5m0-4.5l-4.5 4.5M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                 </svg>
               </div>
-              <h2 className="text-lg font-semibold text-white mb-2">Live scraping is not enabled</h2>
+              <h2 className="text-lg font-semibold text-white mb-2">Firecrawl API key not configured</h2>
               <p className="text-sm text-zinc-400 max-w-sm">
-                Set the <code className="rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-amber-400">SCRAPING_ENABLED=true</code> environment variable to fetch real listings from AutoTrader SA and Cars.co.za.
+                Set the <code className="rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-amber-400">FIRECRAWL_API_KEY</code> environment variable to fetch live listings from Cars.co.za.
               </p>
             </div>
           ) : (

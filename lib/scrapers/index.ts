@@ -3,8 +3,6 @@ import { rankListings } from '@/lib/ranking';
 import { cacheGet, cacheSet, cacheBuildKey } from './cache';
 
 export const FIRECRAWL_ENABLED = Boolean(process.env.FIRECRAWL_API_KEY);
-/** @deprecated No longer used — kept for backwards compat with the API route header */
-export const SCRAPING_ENABLED = FIRECRAWL_ENABLED;
 
 const inFlight = new Map<string, Promise<Listing[]>>();
 

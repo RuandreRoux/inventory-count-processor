@@ -6,3 +6,5 @@ node_modules/
 *.log
 .DS_Store
 tsconfig.tsbuildinfo
+.mcp.json
+.claude/settings.json

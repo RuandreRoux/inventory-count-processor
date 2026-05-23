@@ -81,13 +81,19 @@ async function fetchPage(url: string, apiKey: string): Promise<ExtractedListing[
         formats: ['json'],
         jsonOptions: {
           prompt:
-            'Extract all car listings visible on this page. For each listing include: ' +
+            'Extract ALL car listings on this page — there should be around 20. For each listing include: ' +
             'title, make, model, variant, year (number), price (ZAR number), mileage (km number), ' +
-            'city, province, url (full https://www.cars.co.za listing URL), imageUrl, ' +
+            'city, province, url (full https://www.cars.co.za listing URL), imageUrl (full image URL), ' +
             'condition, transmission, serviceHistory (boolean).',
           schema: EXTRACTION_SCHEMA,
         },
-        waitFor: 3000,
+        actions: [
+          { type: 'scroll', direction: 'down' },
+          { type: 'wait', milliseconds: 800 },
+          { type: 'scroll', direction: 'down' },
+          { type: 'wait', milliseconds: 800 },
+        ],
+        waitFor: 2000,
         location: { country: 'ZA' },
       }),
     });
@@ -127,6 +133,17 @@ function mapToListing(item: ExtractedListing): Listing | null {
   const url = item.url ?? '';
   const id = buildId('carscoza', url || `${year}-${make}-${item.model}-${item.variant}-${price}`);
 
+  // Fallback: construct CDN image from listing ID in the URL when Firecrawl doesn't return one
+  let imageUrl = item.imageUrl || '';
+  if (!imageUrl) {
+    const listingId = url.match(/\/(\d{6,})\//)?.[1];
+    if (listingId) {
+      const slug = `${year}-${make}-${item.model ?? ''}${item.variant ? '-' + item.variant : ''}`
+        .replace(/\./g, '').replace(/\s+/g, '-').replace(/[^a-zA-Z0-9-]/g, '');
+      imageUrl = `https://img-ik.cars.co.za/ik-seo/carsimages/${listingId}/${slug}.jpg?tr=f-auto,h-267,w-400,q-80`;
+    }
+  }
+
   return {
     id,
     source: 'carscoza',
@@ -146,11 +163,16 @@ function mapToListing(item: ExtractedListing): Listing | null {
     listedDate: new Date().toISOString().slice(0, 10),
     description: item.title ?? `${year} ${make} ${item.model ?? ''}`.trim(),
     url: url || undefined,
-    imageUrl: item.imageUrl || undefined,
+    imageUrl: imageUrl || undefined,
   };
 }
 
-export async function scrapeCarsCozaFirecrawl(query: string, maxPages = 8): Promise<Listing[]> {
+// Multiple sort orders so each request returns a genuinely different slice of inventory.
+// Cars.co.za pagination requires session state that Firecrawl can't share between requests,
+// so varying sort order is more reliable than incrementing P= across parallel requests.
+const SORT_ORDERS = ['sort_rank', 'price_asc', 'price_desc', 'mileage'];
+
+export async function scrapeCarsCozaFirecrawl(query: string, pagesPerSort = 3): Promise<Listing[]> {
   const apiKey = process.env.FIRECRAWL_API_KEY;
   if (!apiKey) {
     console.log('[CarsCozaFirecrawl] FIRECRAWL_API_KEY not set, skipping');
@@ -159,15 +181,20 @@ export async function scrapeCarsCozaFirecrawl(query: string, maxPages = 8): Prom
 
   const { make, model } = normalizeMake(query);
   const mmv = model ? `${make}[${model}]` : make;
-  // Cars.co.za requires literal brackets, not percent-encoded
   const mmvEncoded = encodeURIComponent(mmv).replace(/%5B/gi, '[').replace(/%5D/gi, ']');
-  const buildUrl = (page: number) =>
-    `https://www.cars.co.za/usedcars/?make_model_variant=${mmvEncoded}&sort=sort_rank&P=${page}`;
+  const buildUrl = (sort: string, page: number) =>
+    `https://www.cars.co.za/usedcars/?make_model_variant=${mmvEncoded}&sort=${sort}&P=${page}`;
+
+  // Build all URLs: 4 sort orders × pagesPerSort pages = 12 parallel requests by default
+  const urls = SORT_ORDERS.flatMap(sort =>
+    Array.from({ length: pagesPerSort }, (_, i) => buildUrl(sort, i + 1)),
+  );
+
+  const results = await Promise.all(urls.map(url => fetchPage(url, apiKey)));
 
   const allListings: Listing[] = [];
   const seenIds = new Set<string>();
-
-  const addItems = (items: ExtractedListing[]) => {
+  for (const items of results) {
     for (const item of items) {
       const listing = mapToListing(item);
       if (listing && !seenIds.has(listing.id)) {
@@ -175,31 +202,11 @@ export async function scrapeCarsCozaFirecrawl(query: string, maxPages = 8): Prom
         allListings.push(listing);
       }
     }
-  };
-
-  // Fetch page 1 first — if it's empty the query returned no results
-  const firstPage = await fetchPage(buildUrl(1), apiKey);
-  console.log(`[CarsCozaFirecrawl] Page 1: ${firstPage.length} items`);
-  if (firstPage.length === 0) return [];
-  addItems(firstPage);
-
-  // Fetch remaining pages in batches of 3 in parallel
-  const BATCH = 3;
-  for (let start = 2; start <= maxPages; start += BATCH) {
-    const pageNums = Array.from(
-      { length: Math.min(BATCH, maxPages - start + 1) },
-      (_, i) => start + i,
-    );
-    const results = await Promise.all(pageNums.map(p => fetchPage(buildUrl(p), apiKey)));
-
-    let anyResults = false;
-    for (const items of results) {
-      if (items.length > 0) { anyResults = true; addItems(items); }
-    }
-    console.log(`[CarsCozaFirecrawl] Pages ${pageNums[0]}-${pageNums[pageNums.length - 1]}: ${results.map(r => r.length).join(',')} items`);
-    if (!anyResults) break;
   }
 
-  console.log(`[CarsCozaFirecrawl] Total: ${allListings.length} listings for "${query}"`);
+  const perSort = SORT_ORDERS.map((s, i) =>
+    `${s}:${results.slice(i * pagesPerSort, (i + 1) * pagesPerSort).map(r => r.length).join('+')}`,
+  );
+  console.log(`[CarsCozaFirecrawl] ${perSort.join(' | ')} → ${allListings.length} unique for "${query}"`);
   return allListings;
 }
