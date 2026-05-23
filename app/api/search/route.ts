@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { fetchListings, SCRAPING_ENABLED } from '@/lib/scrapers/index';
+import { fetchListings, SCRAPING_ENABLED, FIRECRAWL_ENABLED } from '@/lib/scrapers/index';
 import type { SearchFilters, RankingWeights, Condition, Transmission, Fuel } from '@/lib/types';
 import { DEFAULT_WEIGHTS } from '@/lib/types';
 
@@ -37,7 +37,7 @@ export async function GET(req: NextRequest) {
 
   return NextResponse.json(ranked, {
     headers: {
-      'X-Data-Source': SCRAPING_ENABLED ? 'live' : 'disabled',
+      'X-Data-Source': (SCRAPING_ENABLED || FIRECRAWL_ENABLED) ? 'live' : 'disabled',
       'X-Scraping-Env': process.env.SCRAPING_ENABLED ?? 'undefined',
       'Cache-Control': 'no-store',
     },
