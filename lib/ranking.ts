@@ -19,6 +19,10 @@ const WARRANTY_YEARS: Record<string, number> = {
   bmw: 2, 'mercedes-benz': 2, mercedes: 2, porsche: 2, mini: 2,
   // 1 year
   audi: 1,
+  // others
+  volvo: 5, mg: 5, byd: 5, omoda: 5, jaecoo: 5, jetour: 5, gac: 5,
+  lexus: 3, seat: 3, dodge: 3, ram: 3, citroën: 3, citroen: 3,
+  mahindra: 3, ssangyong: 3, skoda: 3,
 };
 
 const CURRENT_YEAR = new Date().getFullYear();

@@ -352,6 +352,164 @@ const MAKES: { make: string; models: string[] }[] = [
       "Trailblazer 2.8D LT 4x4",
     ],
   },
+  {
+    make: "BYD",
+    models: [
+      "Atto 3", "Atto 3 Standard Range", "Atto 3 Extended Range",
+      "Seal", "Seal 82.56kWh AWD",
+      "Dolphin", "Dolphin 44.9kWh", "Dolphin 60.48kWh",
+      "Han EV", "Tang EV",
+      "Shark 1.5T PHEV",
+    ],
+  },
+  {
+    make: "Skoda",
+    models: [
+      "Octavia", "Octavia 1.0 TSI Ambition", "Octavia 2.0 TDI Style",
+      "Octavia RS 2.0 TSI", "Octavia Scout 2.0 TDI 4x4",
+      "Fabia 1.0 MPI Active", "Fabia 1.0 TSI Style",
+      "Superb", "Superb 2.0 TDI Style DSG", "Superb 3.6 V6 FSI L&K",
+      "Kodiaq", "Kodiaq 2.0 TDI Style DSG", "Kodiaq RS 2.0 BiTDI",
+      "Karoq 1.5 TSI Style DSG",
+      "Kamiq 1.0 TSI Ambition",
+    ],
+  },
+  {
+    make: "Volvo",
+    models: [
+      "XC40", "XC40 T4 Momentum", "XC40 T5 R-Design AWD", "XC40 Recharge Pure Electric",
+      "XC60", "XC60 T5 Momentum", "XC60 T8 R-Design AWD PHEV",
+      "XC90", "XC90 T6 Momentum AWD", "XC90 T8 Excellence AWD PHEV",
+      "V60 T5 Momentum", "S60 T5 Momentum",
+      "C40 Recharge Pure Electric",
+    ],
+  },
+  {
+    make: "MG",
+    models: [
+      "MG3", "MG3 Excite", "MG3 Essence",
+      "MG5", "MG5 Excite CVT", "MG5 Essence CVT",
+      "ZS", "ZS 1.5 Excite CVT", "ZS EV Excite", "ZS EV Essence",
+      "HS", "HS 1.5T Excite DCT", "HS 1.5T Essence DCT",
+      "MG4 EV Excite", "MG4 EV Essence",
+    ],
+  },
+  {
+    make: "Lexus",
+    models: [
+      "IS 300h", "IS 350 F Sport",
+      "ES 300h Luxury", "ES 350 Luxury",
+      "NX 300h Luxury", "NX 350h F Sport",
+      "RX 350 Luxury", "RX 500h F Sport",
+      "UX 250h Luxury",
+      "LX 600 Luxury",
+    ],
+  },
+  {
+    make: "Jaguar",
+    models: [
+      "XE 2.0D Pure", "XE 2.0T R-Dynamic",
+      "XF 2.0D Pure", "XF 2.0T R-Dynamic",
+      "XJ 3.0 V6 Premium Luxury",
+      "F-Pace 2.0D Pure", "F-Pace 3.0D S AWD",
+      "E-Pace 2.0D SE", "E-Pace P250 R-Dynamic",
+      "F-Type 2.0T Coupe", "F-Type 5.0 V8 SVR",
+      "I-Pace EV400 SE",
+    ],
+  },
+  {
+    make: "Alfa Romeo",
+    models: [
+      "Giulia 2.0T Super", "Giulia 2.9 V6 Quadrifoglio",
+      "Stelvio 2.0T Super AWD", "Stelvio 2.9 V6 Quadrifoglio AWD",
+      "Tonale 1.5T MHEV Sprint",
+    ],
+  },
+  {
+    make: "Fiat",
+    models: [
+      "500 1.2 Lounge", "500 1.4 Abarth",
+      "500X 1.4T Cross Plus AWD",
+      "Tipo 1.4 Pop", "Tipo 1.6 Lounge",
+      "Panda 1.2 Easy",
+    ],
+  },
+  {
+    make: "Citroën",
+    models: [
+      "C3 1.2 PureTech Feel", "C3 1.2 PureTech Shine",
+      "C4 1.2 PureTech Feel", "C4 e-C4 Electric",
+      "C5 Aircross 1.6T Feel",
+    ],
+  },
+  {
+    make: "Seat",
+    models: [
+      "Ibiza 1.0 TSI Style", "Ibiza 1.6 TDI FR",
+      "Leon 1.4 TSI FR", "Leon 2.0 TSI Cupra",
+      "Ateca 1.4 TSI Style", "Ateca 2.0 TDI FR 4Drive",
+    ],
+  },
+  {
+    make: "Dodge",
+    models: [
+      "Challenger 5.7 V8 RT", "Challenger 6.4 V8 Scat Pack", "Challenger 6.2 SRT Hellcat",
+      "Charger 5.7 V8 RT", "Charger 6.4 V8 Scat Pack",
+      "Durango 5.7 V8 RT AWD",
+    ],
+  },
+  {
+    make: "RAM",
+    models: [
+      "1500 5.7 V8 Laramie Crew Cab",
+      "1500 TRX 6.2 V8",
+    ],
+  },
+  {
+    make: "Mahindra",
+    models: [
+      "Pik Up 2.2 mHawk S10", "Pik Up 2.2 mHawk S11 4x4",
+      "Scorpio 2.2 mHawk S11",
+      "XUV300 1.2T W8",
+      "Thar 2.2 mHawk 4x4",
+    ],
+  },
+  {
+    make: "Ssangyong",
+    models: [
+      "Rexton 2.2 4WD SX", "Rexton 2.2 4WD Luxury",
+      "Musso 2.2 Luxury 4x4",
+      "Korando 1.5T Quartz",
+      "Tivoli 1.5T Quartz",
+    ],
+  },
+  {
+    make: "Omoda",
+    models: [
+      "5 1.6T Executive DCT",
+      "5 EV",
+    ],
+  },
+  {
+    make: "Jaecoo",
+    models: [
+      "7 1.6T Executive AWD",
+    ],
+  },
+  {
+    make: "Jetour",
+    models: [
+      "X70 1.5T Luxury",
+      "Dashing 1.5T",
+    ],
+  },
+  {
+    make: "GAC",
+    models: [
+      "GS3 1.5T Comfort", "GS3 1.5T Sport",
+      "GS4 1.5T Comfort", "GS4 1.5T Sport",
+    ],
+  },
 ];
 
 // Flat list: each make + each make+model combo
