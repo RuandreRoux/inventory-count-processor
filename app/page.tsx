@@ -1,8 +1,7 @@
 "use client";
 
-import { useRouter } from "next/navigation";
-import { useState } from "react";
 import Link from "next/link";
+import SearchAutocomplete from "@/components/SearchAutocomplete";
 
 const POPULAR = [
   "Toyota Hilux", "VW Polo", "Ford Ranger", "BMW 3 Series",
@@ -35,14 +34,6 @@ const HOW_IT_WORKS = [
 ];
 
 export default function HomePage() {
-  const router = useRouter();
-  const [q, setQ] = useState("");
-
-  const handleSearch = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (q.trim()) router.push(`/search?q=${encodeURIComponent(q.trim())}`);
-  };
-
   return (
     <div className="min-h-screen flex flex-col">
       <header className="flex items-center justify-between px-6 py-4 border-b border-zinc-800/60">
@@ -87,31 +78,22 @@ export default function HomePage() {
             them by what matters <em className="text-zinc-300 not-italic">to you</em>.
           </p>
 
-          <form onSubmit={handleSearch} className="flex flex-col sm:flex-row gap-3 justify-center">
-            <input
-              type="text"
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
+          <div className="flex justify-center">
+            <SearchAutocomplete
+              size="lg"
               placeholder="Try: Toyota Hilux, VW Polo, BMW 3 Series..."
-              className="h-14 w-full max-w-md rounded-xl border border-zinc-700 bg-zinc-900 px-5 text-base text-zinc-100 placeholder-zinc-500 focus:border-amber-500 focus:outline-none focus:ring-1 focus:ring-amber-500/30 transition"
             />
-            <button
-              type="submit"
-              className="h-14 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 px-8 text-base font-bold text-zinc-900 hover:from-amber-400 hover:to-orange-400 transition-all shadow-[0_0_24px_rgba(245,158,11,0.25)] hover:shadow-[0_0_32px_rgba(245,158,11,0.4)] shrink-0"
-            >
-              Search Cars
-            </button>
-          </form>
+          </div>
 
           <div className="flex flex-wrap justify-center gap-2 pt-2">
             {POPULAR.map((s) => (
-              <button
+              <Link
                 key={s}
-                onClick={() => router.push(`/search?q=${encodeURIComponent(s)}`)}
+                href={`/search?q=${encodeURIComponent(s)}`}
                 className="rounded-full border border-zinc-700 bg-zinc-900/60 px-3 py-1.5 text-xs text-zinc-400 hover:border-amber-500/50 hover:text-amber-400 transition-colors"
               >
                 {s}
-              </button>
+              </Link>
             ))}
           </div>
         </div>
