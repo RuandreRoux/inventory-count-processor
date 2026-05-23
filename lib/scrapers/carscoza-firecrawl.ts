@@ -1,7 +1,7 @@
 import type { Listing } from '@/lib/types';
 import { buildId, guessTransmission, guessFuel } from './normalize';
 
-const FIRECRAWL_SCRAPE_URL = 'https://api.firecrawl.dev/v1/scrape';
+const FIRECRAWL_BASE = 'https://api.firecrawl.dev/v1';
 
 const MAKES: Record<string, string> = {
   toyota: 'Toyota', volkswagen: 'Volkswagen', vw: 'Volkswagen', ford: 'Ford',
@@ -36,11 +36,6 @@ interface ExtractedListing {
   serviceHistory?: boolean;
 }
 
-type FirecrawlResponse = {
-  success?: boolean;
-  data?: { json?: { listings?: ExtractedListing[] } };
-};
-
 const EXTRACTION_SCHEMA = {
   type: 'object',
   properties: {
@@ -70,51 +65,80 @@ const EXTRACTION_SCHEMA = {
   required: ['listings'],
 };
 
-async function fetchPage(url: string, apiKey: string): Promise<ExtractedListing[]> {
-  let res: Response;
+const EXTRACTION_PROMPT =
+  'Extract ALL car listings on this page — there should be around 20. For each listing include: ' +
+  'title, make, model, variant, year (number), price (ZAR number), mileage (km number), ' +
+  'city, province, url (full https://www.cars.co.za listing URL), imageUrl (full image URL), ' +
+  'condition, transmission, serviceHistory (boolean).';
+
+type BatchStatusResponse = {
+  status?: 'processing' | 'completed' | 'failed' | 'cancelled';
+  completed?: number;
+  total?: number;
+  data?: Array<{ json?: { listings?: ExtractedListing[] }; metadata?: { sourceURL?: string } }>;
+};
+
+// Sends all URLs to Firecrawl's batch endpoint, polls until complete.
+// Firecrawl manages concurrency on their end — avoids the timeout/rate-limit issues
+// that occur when firing many individual scrape requests simultaneously.
+async function batchScrape(urls: string[], apiKey: string): Promise<ExtractedListing[]> {
+  // Start the batch job
+  let startRes: Response;
   try {
-    res = await fetch(FIRECRAWL_SCRAPE_URL, {
+    startRes = await fetch(`${FIRECRAWL_BASE}/batch/scrape`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
       body: JSON.stringify({
-        url,
+        urls,
         formats: ['json'],
-        jsonOptions: {
-          prompt:
-            'Extract ALL car listings on this page — there should be around 20. For each listing include: ' +
-            'title, make, model, variant, year (number), price (ZAR number), mileage (km number), ' +
-            'city, province, url (full https://www.cars.co.za listing URL), imageUrl (full image URL), ' +
-            'condition, transmission, serviceHistory (boolean).',
-          schema: EXTRACTION_SCHEMA,
-        },
-        actions: [
-          { type: 'scroll', direction: 'down' },
-          { type: 'wait', milliseconds: 800 },
-          { type: 'scroll', direction: 'down' },
-          { type: 'wait', milliseconds: 800 },
-        ],
+        jsonOptions: { prompt: EXTRACTION_PROMPT, schema: EXTRACTION_SCHEMA },
         waitFor: 2000,
         location: { country: 'ZA' },
       }),
     });
   } catch (e) {
-    console.error('[CarsCozaFirecrawl] Network error:', e);
+    console.error('[CarsCozaFirecrawl] Batch start network error:', e);
     return [];
   }
 
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    console.error(`[CarsCozaFirecrawl] HTTP ${res.status} for ${url}: ${text.slice(0, 200)}`);
+  if (!startRes.ok) {
+    const text = await startRes.text().catch(() => '');
+    console.error(`[CarsCozaFirecrawl] Batch start HTTP ${startRes.status}: ${text.slice(0, 200)}`);
     return [];
   }
 
-  const body = (await res.json()) as FirecrawlResponse;
-  const listings = body?.data?.json?.listings;
-  if (!Array.isArray(listings)) {
-    console.log(`[CarsCozaFirecrawl] No listings array in response for page ${url}`);
+  const { id } = (await startRes.json()) as { id?: string };
+  if (!id) {
+    console.error('[CarsCozaFirecrawl] No batch ID in response');
     return [];
   }
-  return listings;
+  console.log(`[CarsCozaFirecrawl] Batch ${id} started — ${urls.length} URLs`);
+
+  // Poll until completed or deadline reached (API route maxDuration is 60s)
+  const deadline = Date.now() + 50_000;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 3000));
+
+    const pollRes = await fetch(`${FIRECRAWL_BASE}/batch/scrape/${id}`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+    }).catch(() => null);
+
+    if (!pollRes?.ok) continue;
+
+    const status = (await pollRes.json()) as BatchStatusResponse;
+    console.log(`[CarsCozaFirecrawl] Batch ${id}: ${status.status} (${status.completed ?? 0}/${status.total ?? urls.length})`);
+
+    if (status.status === 'completed') {
+      return (status.data ?? []).flatMap(page => page.json?.listings ?? []);
+    }
+    if (status.status === 'failed' || status.status === 'cancelled') {
+      console.error(`[CarsCozaFirecrawl] Batch ${id} ${status.status}`);
+      return [];
+    }
+  }
+
+  console.error(`[CarsCozaFirecrawl] Batch ${id} did not complete within deadline`);
+  return [];
 }
 
 function mapToListing(item: ExtractedListing): Listing | null {
@@ -133,7 +157,7 @@ function mapToListing(item: ExtractedListing): Listing | null {
   const url = item.url ?? '';
   const id = buildId('carscoza', url || `${year}-${make}-${item.model}-${item.variant}-${price}`);
 
-  // Fallback: construct CDN image from listing ID in the URL when Firecrawl doesn't return one
+  // Fallback: construct CDN image URL from listing ID when Firecrawl doesn't return one
   let imageUrl = item.imageUrl || '';
   if (!imageUrl) {
     const listingId = url.match(/\/(\d{6,})\//)?.[1];
@@ -167,11 +191,6 @@ function mapToListing(item: ExtractedListing): Listing | null {
   };
 }
 
-// Multiple sort orders so each request returns a genuinely different slice of inventory.
-// Cars.co.za pagination requires session state that Firecrawl can't share between requests,
-// so varying sort order is more reliable than incrementing P= across parallel requests.
-const SORT_ORDERS = ['sort_rank', 'price_asc', 'price_desc', 'mileage'];
-
 export async function scrapeCarsCozaFirecrawl(query: string, pagesPerSort = 3): Promise<Listing[]> {
   const apiKey = process.env.FIRECRAWL_API_KEY;
   if (!apiKey) {
@@ -182,31 +201,26 @@ export async function scrapeCarsCozaFirecrawl(query: string, pagesPerSort = 3): 
   const { make, model } = normalizeMake(query);
   const mmv = model ? `${make}[${model}]` : make;
   const mmvEncoded = encodeURIComponent(mmv).replace(/%5B/gi, '[').replace(/%5D/gi, ']');
-  const buildUrl = (sort: string, page: number) =>
-    `https://www.cars.co.za/usedcars/?make_model_variant=${mmvEncoded}&sort=${sort}&P=${page}`;
 
-  // Build all URLs: 4 sort orders × pagesPerSort pages = 12 parallel requests by default
-  const urls = SORT_ORDERS.flatMap(sort =>
-    Array.from({ length: pagesPerSort }, (_, i) => buildUrl(sort, i + 1)),
+  // Two sort orders × pagesPerSort = 6 URLs by default, sent as one batch job
+  const urls = ['sort_rank', 'price_asc'].flatMap(sort =>
+    Array.from({ length: pagesPerSort }, (_, i) =>
+      `https://www.cars.co.za/usedcars/?make_model_variant=${mmvEncoded}&sort=${sort}&P=${i + 1}`,
+    ),
   );
 
-  const results = await Promise.all(urls.map(url => fetchPage(url, apiKey)));
+  const extracted = await batchScrape(urls, apiKey);
 
   const allListings: Listing[] = [];
   const seenIds = new Set<string>();
-  for (const items of results) {
-    for (const item of items) {
-      const listing = mapToListing(item);
-      if (listing && !seenIds.has(listing.id)) {
-        seenIds.add(listing.id);
-        allListings.push(listing);
-      }
+  for (const item of extracted) {
+    const listing = mapToListing(item);
+    if (listing && !seenIds.has(listing.id)) {
+      seenIds.add(listing.id);
+      allListings.push(listing);
     }
   }
 
-  const perSort = SORT_ORDERS.map((s, i) =>
-    `${s}:${results.slice(i * pagesPerSort, (i + 1) * pagesPerSort).map(r => r.length).join('+')}`,
-  );
-  console.log(`[CarsCozaFirecrawl] ${perSort.join(' | ')} → ${allListings.length} unique for "${query}"`);
+  console.log(`[CarsCozaFirecrawl] ${allListings.length} unique listings for "${query}"`);
   return allListings;
 }
