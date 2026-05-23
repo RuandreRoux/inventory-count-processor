@@ -31,6 +31,7 @@ export interface ScoreBreakdown {
   price: number;
   mileage: number;
   year: number;
+  warranty: number;
   condition: number;
   serviceHistory: number;
 }
@@ -52,16 +53,18 @@ export interface RankingWeights {
   price: number;
   mileage: number;
   year: number;
+  warranty: number;
   condition: number;
   serviceHistory: number;
 }
 
 export const DEFAULT_WEIGHTS: RankingWeights = {
-  price: 35,
-  mileage: 25,
-  year: 20,
-  condition: 12,
-  serviceHistory: 8,
+  price: 33,
+  mileage: 22,
+  year: 13,
+  warranty: 15,
+  condition: 10,
+  serviceHistory: 7,
 };
 
 export const SOURCE_LABELS: Record<Source, string> = {

@@ -8,10 +8,11 @@ interface WeightSlidersProps {
 }
 
 const FACTORS: { key: keyof RankingWeights; label: string; description: string }[] = [
-  { key: "price", label: "Price", description: "Lower price scores higher" },
-  { key: "mileage", label: "Mileage", description: "Fewer kilometres scores higher" },
-  { key: "year", label: "Year", description: "Newer vehicles score higher" },
-  { key: "condition", label: "Condition", description: "Excellent condition scores highest" },
+  { key: "price",          label: "Price",           description: "Lower price scores higher" },
+  { key: "mileage",        label: "Mileage",         description: "Fewer kilometres scores higher" },
+  { key: "year",           label: "Year",            description: "Newer vehicles score higher" },
+  { key: "warranty",       label: "Warranty",        description: "Estimated remaining manufacturer warranty" },
+  { key: "condition",      label: "Condition",       description: "Excellent condition scores highest" },
   { key: "serviceHistory", label: "Service History", description: "Full history scores higher" },
 ];
 
@@ -63,7 +64,7 @@ export default function WeightSliders({ weights, onChange }: WeightSlidersProps)
 
       <button
         onClick={() =>
-          onChange({ price: 35, mileage: 25, year: 20, condition: 12, serviceHistory: 8 })
+          onChange({ price: 33, mileage: 22, year: 13, warranty: 15, condition: 10, serviceHistory: 7 })
         }
         className="w-full rounded-lg border border-zinc-700 py-1.5 text-xs text-zinc-400 hover:border-amber-500/50 hover:text-amber-400 transition-colors"
       >

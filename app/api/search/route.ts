@@ -9,8 +9,8 @@ export const maxDuration = 60;
 function parseWeights(raw: string | null): RankingWeights {
   if (!raw) return DEFAULT_WEIGHTS;
   const parts = raw.split(',').map(Number);
-  if (parts.length !== 5 || parts.some(isNaN)) return DEFAULT_WEIGHTS;
-  return { price: parts[0], mileage: parts[1], year: parts[2], condition: parts[3], serviceHistory: parts[4] };
+  if (parts.length !== 6 || parts.some(isNaN)) return DEFAULT_WEIGHTS;
+  return { price: parts[0], mileage: parts[1], year: parts[2], warranty: parts[3], condition: parts[4], serviceHistory: parts[5] };
 }
 
 export async function GET(req: NextRequest) {

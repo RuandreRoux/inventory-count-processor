@@ -22,7 +22,7 @@ function buildQuery(filters: SearchFilters, weights: RankingWeights): string {
   if (filters.province) p.set("province", filters.province);
   p.set(
     "weights",
-    [weights.price, weights.mileage, weights.year, weights.condition, weights.serviceHistory].join(",")
+    [weights.price, weights.mileage, weights.year, weights.warranty, weights.condition, weights.serviceHistory].join(",")
   );
   return p.toString();
 }
