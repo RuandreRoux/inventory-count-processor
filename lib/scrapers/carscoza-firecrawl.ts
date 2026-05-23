@@ -71,74 +71,40 @@ const EXTRACTION_PROMPT =
   'city, province, url (full https://www.cars.co.za listing URL), imageUrl (full image URL), ' +
   'condition, transmission, serviceHistory (boolean).';
 
-type BatchStatusResponse = {
-  status?: 'processing' | 'completed' | 'failed' | 'cancelled';
-  completed?: number;
-  total?: number;
-  data?: Array<{ json?: { listings?: ExtractedListing[] }; metadata?: { sourceURL?: string } }>;
-};
-
-// Sends all URLs to Firecrawl's batch endpoint, polls until complete.
-// Firecrawl manages concurrency on their end — avoids the timeout/rate-limit issues
-// that occur when firing many individual scrape requests simultaneously.
-async function batchScrape(urls: string[], apiKey: string): Promise<ExtractedListing[]> {
-  // Start the batch job
-  let startRes: Response;
+// Scrapes a single URL via Firecrawl extract, returns empty on timeout or error.
+async function scrapeUrl(url: string, apiKey: string, timeoutMs = 25_000): Promise<ExtractedListing[]> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    startRes = await fetch(`${FIRECRAWL_BASE}/batch/scrape`, {
+    const res = await fetch(`${FIRECRAWL_BASE}/scrape`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+      signal: controller.signal,
       body: JSON.stringify({
-        urls,
-        formats: ['json'],
-        jsonOptions: { prompt: EXTRACTION_PROMPT, schema: EXTRACTION_SCHEMA },
+        url,
+        formats: ['extract'],
+        extract: { prompt: EXTRACTION_PROMPT, schema: EXTRACTION_SCHEMA },
         waitFor: 2000,
         location: { country: 'ZA' },
       }),
     });
-  } catch (e) {
-    console.error('[CarsCozaFirecrawl] Batch start network error:', e);
-    return [];
-  }
-
-  if (!startRes.ok) {
-    const text = await startRes.text().catch(() => '');
-    console.error(`[CarsCozaFirecrawl] Batch start HTTP ${startRes.status}: ${text.slice(0, 200)}`);
-    return [];
-  }
-
-  const { id } = (await startRes.json()) as { id?: string };
-  if (!id) {
-    console.error('[CarsCozaFirecrawl] No batch ID in response');
-    return [];
-  }
-  console.log(`[CarsCozaFirecrawl] Batch ${id} started — ${urls.length} URLs`);
-
-  // Poll until completed or deadline reached (API route maxDuration is 60s)
-  const deadline = Date.now() + 50_000;
-  while (Date.now() < deadline) {
-    await new Promise(r => setTimeout(r, 3000));
-
-    const pollRes = await fetch(`${FIRECRAWL_BASE}/batch/scrape/${id}`, {
-      headers: { Authorization: `Bearer ${apiKey}` },
-    }).catch(() => null);
-
-    if (!pollRes?.ok) continue;
-
-    const status = (await pollRes.json()) as BatchStatusResponse;
-    console.log(`[CarsCozaFirecrawl] Batch ${id}: ${status.status} (${status.completed ?? 0}/${status.total ?? urls.length})`);
-
-    if (status.status === 'completed') {
-      return (status.data ?? []).flatMap(page => page.json?.listings ?? []);
-    }
-    if (status.status === 'failed' || status.status === 'cancelled') {
-      console.error(`[CarsCozaFirecrawl] Batch ${id} ${status.status}`);
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      console.error(`[CarsCozaFirecrawl] HTTP ${res.status} for ${url}: ${text.slice(0, 200)}`);
       return [];
     }
+    const data = (await res.json()) as { data?: { extract?: { listings?: ExtractedListing[] } } };
+    return data.data?.extract?.listings ?? [];
+  } catch (e: unknown) {
+    if (e instanceof Error && e.name === 'AbortError') {
+      console.error(`[CarsCozaFirecrawl] Timeout for ${url}`);
+    } else {
+      console.error(`[CarsCozaFirecrawl] Error for ${url}:`, e);
+    }
+    return [];
+  } finally {
+    clearTimeout(timer);
   }
-
-  console.error(`[CarsCozaFirecrawl] Batch ${id} did not complete within deadline`);
-  return [];
 }
 
 function mapToListing(item: ExtractedListing): Listing | null {
@@ -202,14 +168,15 @@ export async function scrapeCarsCozaFirecrawl(query: string, pagesPerSort = 3): 
   const mmv = model ? `${make}[${model}]` : make;
   const mmvEncoded = encodeURIComponent(mmv).replace(/%5B/gi, '[').replace(/%5D/gi, ']');
 
-  // Two sort orders × pagesPerSort = 6 URLs by default, sent as one batch job
+  // Two sort orders × pagesPerSort = 6 URLs by default, fired in parallel
   const urls = ['sort_rank', 'price_asc'].flatMap(sort =>
     Array.from({ length: pagesPerSort }, (_, i) =>
       `https://www.cars.co.za/usedcars/?make_model_variant=${mmvEncoded}&sort=${sort}&P=${i + 1}`,
     ),
   );
 
-  const extracted = await batchScrape(urls, apiKey);
+  const results = await Promise.allSettled(urls.map(url => scrapeUrl(url, apiKey)));
+  const extracted = results.flatMap(r => r.status === 'fulfilled' ? r.value : []);
 
   const allListings: Listing[] = [];
   const seenIds = new Set<string>();
