@@ -79,8 +79,9 @@ type FirecrawlResponse = {
   data?: { json?: { listings?: ExtractedListing[] } };
 };
 
-// Scrapes a single URL via Firecrawl json extraction, returns empty on error.
-async function scrapeUrl(url: string, apiKey: string): Promise<ExtractedListing[]> {
+// Returns extracted listings, or null if the request itself failed (network/HTTP error).
+// A successful response with no listings returns [] — that signals the end of pagination.
+async function scrapeUrl(url: string, apiKey: string): Promise<ExtractedListing[] | null> {
   let res: Response;
   try {
     res = await fetch(`${FIRECRAWL_BASE}/scrape`, {
@@ -102,13 +103,13 @@ async function scrapeUrl(url: string, apiKey: string): Promise<ExtractedListing[
     });
   } catch (e) {
     console.error(`[CarsCozaFirecrawl] Network error for ${url}:`, e);
-    return [];
+    return null;
   }
 
   if (!res.ok) {
     const text = await res.text().catch(() => '');
     console.error(`[CarsCozaFirecrawl] HTTP ${res.status} for ${url}: ${text.slice(0, 200)}`);
-    return [];
+    return null;
   }
 
   const body = (await res.json()) as FirecrawlResponse;
@@ -194,8 +195,16 @@ export async function scrapeCarsCozaFirecrawl(query: string): Promise<Listing[]>
     let page = 1;
     while (true) {
       const url = `https://www.cars.co.za/usedcars/?make_model_variant=${mmvEncoded}&sort=${sort}&P=${page}`;
-      const items = await scrapeUrl(url, key);
-      if (items.length === 0) break;
+
+      // Retry up to 3 times on transient Firecrawl errors
+      let items: ExtractedListing[] | null = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        items = await scrapeUrl(url, key);
+        if (items !== null) break;
+        await new Promise(r => setTimeout(r, 3000));
+      }
+
+      if (items === null || items.length === 0) break;
       all.push(...items);
       page++;
     }
