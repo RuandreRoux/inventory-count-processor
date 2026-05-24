@@ -32,6 +32,7 @@ interface ExtractedListing {
   url?: string;
   imageUrl?: string;
   condition?: string;
+  color?: string;
   transmission?: string;
   serviceHistory?: boolean;
 }
@@ -56,6 +57,7 @@ const EXTRACTION_SCHEMA = {
           url:            { type: 'string' },
           imageUrl:       { type: 'string' },
           condition:      { type: 'string' },
+          color:          { type: 'string' },
           transmission:   { type: 'string' },
           serviceHistory: { type: 'boolean' },
         },
@@ -69,7 +71,8 @@ const EXTRACTION_PROMPT =
   'Extract ALL car listings on this page — there should be around 20. For each listing include: ' +
   'title, make, model, variant, year (number), price (ZAR number), mileage (km number), ' +
   'city, province, url (full https://www.cars.co.za listing URL), imageUrl (full image URL), ' +
-  'condition, transmission, serviceHistory (boolean).';
+  'color (exterior colour if shown), condition (e.g. Excellent, Good, Fair, Poor, Used, New), ' +
+  'transmission, serviceHistory (boolean).';
 
 type FirecrawlResponse = {
   success?: boolean;
@@ -112,6 +115,17 @@ async function scrapeUrl(url: string, apiKey: string): Promise<ExtractedListing[
   return body?.data?.json?.listings ?? [];
 }
 
+// Maps a raw condition string from Cars.co.za to our Condition type.
+function normalizeCondition(raw?: string): 'excellent' | 'good' | 'fair' | 'poor' {
+  const c = raw?.trim().toLowerCase() ?? '';
+  if (c === 'excellent') return 'excellent';
+  if (c === 'fair')      return 'fair';
+  if (c === 'poor')      return 'poor';
+  // Cars.co.za typically says "Used" or "New" — treat new/demo as excellent, used as good
+  if (c === 'new' || c === 'demo' || c === 'demo vehicle') return 'excellent';
+  return 'good';
+}
+
 function mapToListing(item: ExtractedListing): Listing | null {
   const make = item.make?.trim();
   const year = item.year;
@@ -148,11 +162,11 @@ function mapToListing(item: ExtractedListing): Listing | null {
     year,
     price,
     mileage: item.mileage ?? 0,
-    condition: 'good',
+    condition: normalizeCondition(item.condition),
     serviceHistory: item.serviceHistory ?? false,
     transmission,
     fuel,
-    color: '',
+    color: item.color?.trim() ?? '',
     province: item.province ?? '',
     city: item.city ?? '',
     listedDate: new Date().toISOString().slice(0, 10),
