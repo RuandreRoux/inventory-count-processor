@@ -187,8 +187,8 @@ export async function scrapeCarsCozaFirecrawl(query: string, pagesPerSort = 3): 
   const mmv = model ? `${make}[${model}]` : make;
   const mmvEncoded = encodeURIComponent(mmv).replace(/%5B/gi, '[').replace(/%5D/gi, ']');
 
-  // Two sort orders × pagesPerSort = 6 URLs by default, fired in parallel
-  const urls = ['sort_rank', 'price_asc'].flatMap(sort =>
+  // 4 sort orders × pagesPerSort pages, all fired in parallel
+  const urls = ['sort_rank', 'price_asc', 'price_desc', 'mileage'].flatMap(sort =>
     Array.from({ length: pagesPerSort }, (_, i) =>
       `https://www.cars.co.za/usedcars/?make_model_variant=${mmvEncoded}&sort=${sort}&P=${i + 1}`,
     ),
