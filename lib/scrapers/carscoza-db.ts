@@ -36,8 +36,7 @@ function listingToRow(l: Listing) {
 export async function scrapeToDb(make: string, model: string): Promise<ScrapeStats> {
   const { scrapeCarsCozaFirecrawl } = await import('./carscoza-firecrawl');
   const query = model ? `${make} ${model}` : make;
-  // 4 sort orders × 5 pages = 20 parallel requests → dedup catches all ~99 unique listings
-  const listings = await scrapeCarsCozaFirecrawl(query, 5);
+  const listings = await scrapeCarsCozaFirecrawl(query);
 
   const rows = listings.map(listingToRow);
 

@@ -176,7 +176,7 @@ function mapToListing(item: ExtractedListing): Listing | null {
   };
 }
 
-export async function scrapeCarsCozaFirecrawl(query: string, pagesPerSort = 3): Promise<Listing[]> {
+export async function scrapeCarsCozaFirecrawl(query: string): Promise<Listing[]> {
   const apiKey = process.env.FIRECRAWL_API_KEY;
   if (!apiKey) {
     console.log('[CarsCozaFirecrawl] FIRECRAWL_API_KEY not set, skipping');
@@ -187,15 +187,25 @@ export async function scrapeCarsCozaFirecrawl(query: string, pagesPerSort = 3): 
   const mmv = model ? `${make}[${model}]` : make;
   const mmvEncoded = encodeURIComponent(mmv).replace(/%5B/gi, '[').replace(/%5D/gi, ']');
 
-  // 4 sort orders × pagesPerSort pages, all fired in parallel
-  const urls = ['sort_rank', 'price_asc', 'price_desc', 'mileage'].flatMap(sort =>
-    Array.from({ length: pagesPerSort }, (_, i) =>
-      `https://www.cars.co.za/usedcars/?make_model_variant=${mmvEncoded}&sort=${sort}&P=${i + 1}`,
-    ),
-  );
+  // Each sort order pages sequentially until a page returns empty.
+  // All 4 sort orders run in parallel; dedup removes cross-order overlaps.
+  async function exhaustSort(sort: string, key: string): Promise<ExtractedListing[]> {
+    const all: ExtractedListing[] = [];
+    let page = 1;
+    while (true) {
+      const url = `https://www.cars.co.za/usedcars/?make_model_variant=${mmvEncoded}&sort=${sort}&P=${page}`;
+      const items = await scrapeUrl(url, key);
+      if (items.length === 0) break;
+      all.push(...items);
+      page++;
+    }
+    return all;
+  }
 
-  const results = await Promise.allSettled(urls.map(url => scrapeUrl(url, apiKey)));
-  const extracted = results.flatMap(r => r.status === 'fulfilled' ? r.value : []);
+  const perSort = await Promise.all(
+    ['sort_rank', 'price_asc', 'price_desc', 'mileage'].map(sort => exhaustSort(sort, apiKey)),
+  );
+  const extracted = perSort.flat();
 
   const allListings: Listing[] = [];
   const seenIds = new Set<string>();
