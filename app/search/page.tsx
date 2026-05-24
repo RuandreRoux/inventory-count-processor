@@ -37,7 +37,7 @@ function SearchResults() {
   const [listings, setListings] = useState<Listing[]>([]);
   const [loading, setLoading] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [dataSource, setDataSource] = useState<"live" | "disabled" | null>(null);
+  const [dataSource, setDataSource] = useState<"database" | "disabled" | null>(null);
 
   // Keep filters.query in sync with the URL — the Navbar pushes a new ?q= without
   // going through setFilters, so state would otherwise stay on the old query.
@@ -51,7 +51,7 @@ function SearchResults() {
     try {
       const res = await fetch(`/api/search?${buildQuery(f, w)}`);
       const source = res.headers.get("X-Data-Source");
-      setDataSource(source === "live" ? "live" : "disabled");
+      setDataSource(source === "database" ? "database" : "disabled");
       const data = await res.json();
       setListings(data);
     } catch {
@@ -187,9 +187,23 @@ function SearchResults() {
                     d="M9.75 9.75l4.5 4.5m0-4.5l-4.5 4.5M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                 </svg>
               </div>
-              <h2 className="text-lg font-semibold text-white mb-2">Firecrawl API key not configured</h2>
+              <h2 className="text-lg font-semibold text-white mb-2">Database not configured</h2>
               <p className="text-sm text-zinc-400 max-w-sm">
-                Set the <code className="rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-amber-400">FIRECRAWL_API_KEY</code> environment variable to fetch live listings from Cars.co.za.
+                Set <code className="rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-amber-400">SUPABASE_URL</code> and{" "}
+                <code className="rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-amber-400">SUPABASE_SERVICE_ROLE_KEY</code> to enable listings.
+              </p>
+            </div>
+          ) : listings.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-24 text-center">
+              <div className="mb-4 rounded-full border border-zinc-700 bg-zinc-800/50 p-5">
+                <svg className="h-8 w-8 text-zinc-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
+                    d="M21 21l-4.35-4.35M17 11A6 6 0 1 1 5 11a6 6 0 0 1 12 0z" />
+                </svg>
+              </div>
+              <h2 className="text-lg font-semibold text-white mb-2">No listings found</h2>
+              <p className="text-sm text-zinc-400 max-w-sm">
+                Try adjusting your search or filters. New listings are added when a scrape is triggered for that make and model.
               </p>
             </div>
           ) : (
